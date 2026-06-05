@@ -174,9 +174,8 @@ This FRD is an active operational tool utilized by various stakeholders througho
 *   **CFO & Finance Officer:** Uses the Finance Vault section to verify the double-entry ledger logic, the 5,000 ETB four-eyes threshold, and the Telebirr reconciliation workflows.
 *   **Internal/External Auditors:** Uses the Security and Data Privacy sections during annual reviews to verify that PII is encrypted at rest (AES-256), that the hash-chained audit log cannot be tampered with, and that data retention cron jobs (e.g., wiping rejected applicants after 6 months) are executing correctly.
 ---
-# PART ONE — FOUNDATION (Continued)
 
-## Section 2 — Institutional Context
+# Section 2 — Institutional Context
 
 ### 2.1 Institution Profile
 

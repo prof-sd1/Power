@@ -410,3 +410,290 @@ The selection of the technology stack for POC-AMS is not driven by trends, but b
     *   `api.powercollege.edu.et/academic/*` routes to the Academic Core port.
     *   `live.powercollege.edu.et/*` routes to the Node.js WebSocket port.
 *   **Security & Rate Limiting:** Nginx enforces strict rate limiting (e.g., max 60 requests/minute per IP for login endpoints) to mitigate brute-force attacks and DDoS. It also injects mandatory HTTP security headers (Content Security Policy, X-Frame-Options: DENY, Referrer-Policy) into every response.
+
+---
+
+# PART TWO — SYSTEM ARCHITECTURE (Continued)
+
+## Section 5 — Data Architecture
+
+The data architecture of the POC-AMS is designed to enforce the "Separation of Duties" and "Principle of Least Privilege" at the deepest possible level: the database engine itself. By strictly isolating domains within PostgreSQL and utilizing cryptographic boundaries for inter-service communication, the system ensures that a compromise in the Learning Management System (LMS) cannot lead to a breach of the Finance Vault or the Immutable Audit Log.
+
+### 5.1 Schema Isolation Map
+
+The system utilizes a single PostgreSQL 16 cluster, but data is strictly partitioned into isolated schemas. Cross-schema `JOIN` queries are strictly prohibited at the application layer; data aggregation across domains must be done via the application logic or materialized views managed by the DBA.
+
+*   **`schema_auth`**: Users, roles, permissions, MFA secrets, session tokens, and password hashes.
+*   **`schema_sis`**: Admissions workflows, student profiles, enrollment records, grade lifecycles, transcripts, and graduation clearance chains.
+*   **`schema_finance`**: Student wallets, double-entry ledger transactions, payment gateway webhooks, and financial holds. *(Strictly isolated from academic data).*
+*   **`schema_lms`**: Course catalogs, curriculum hierarchies, content modules, live classroom attendance, and assignment submissions.
+*   **`schema_library`**: E-resource metadata, DRM licensing, borrowing records, and FIFO waitlists.
+*   **`schema_audit`**: The immutable, hash-chained event log. Configured with `WRITE-ONCE` database triggers.
+*   **`schema_ai`**: `pgvector` embeddings for course materials and localized chat history for the RAG engine.
+
+### 5.2 Database User Permission Matrix
+
+To prevent lateral movement in the event of an application-level SQL injection, the PostgreSQL connection users are strictly mapped to specific schemas.
+
+| Database User | Granted Schemas | Permissions | Rationale |
+| :--- | :--- | :--- | :--- |
+| **`user_auth`** | `schema_auth` | `CRUD` | Manages identity. Cannot see grades or finances. |
+| **`user_academic`** | `schema_sis`, `schema_lms`, `schema_library` | `CRUD` | Manages the student lifecycle and learning. |
+| **`user_finance`** | `schema_finance` | `CRUD` | Manages the ledger. **Explicitly denied** access to `schema_sis` or `schema_lms`. |
+| **`user_audit`** | `schema_audit` | `SELECT`, `INSERT` (via strict function) | Read-only for reporting. Inserts are only allowed via a PL/pgSQL function that enforces the hash-chain logic. |
+| **`user_ai`** | `schema_ai`, `schema_lms` | `CRUD` (AI), `SELECT` (LMS) | Can read LMS content to build embeddings, but cannot modify academic records. |
+
+*Note: All application users (`user_academic`, `user_finance`, etc.) are granted `INSERT` privileges on `schema_audit` to write their respective domain events, but they cannot `UPDATE` or `DELETE` audit records.*
+
+### 5.3 Inter-Service Authentication (RS256 JWT)
+
+Because the Finance Vault and Academic Core are isolated applications, they must authenticate each other without sharing a database or a secret symmetric key.
+
+*   **Asymmetric Signing (RS256):** The Authentication Service generates an RSA keypair. The **Private Key** is kept exclusively in the Auth Service's memory (or HashiCorp Vault). The **Public Key** is distributed to the Academic Core, Finance Vault, Node.js Real-Time Engine, and Python AI Satellite.
+*   **Verification:** When the Finance Vault receives an API request from the Academic Core (e.g., "Check Student Wallet Balance"), it verifies the JWT signature locally using the Public Key. This requires zero network calls to the Auth Service, eliminating a single point of failure and ensuring sub-millisecond authentication overhead.
+*   **Token Lifecycle:** Access tokens have a strict 15-minute TTL. Refresh tokens are rotated on every use and tracked in Redis to allow instant, system-wide revocation if a user is suspended by the Compliance Officer.
+
+### 5.4 Cross-Domain Event Contract (Redis Pub/Sub)
+
+The Domain-Separated Monolith relies on Redis Pub/Sub for asynchronous, cross-domain communication. To guarantee data integrity, all events follow strict contracts.
+
+**5.4.1 The Transactional Outbox Pattern**
+To prevent the "Double Write" problem (where a database transaction succeeds but the Redis publish fails), the Finance Vault utilizes the Transactional Outbox pattern:
+1.  When a Telebirr payment is verified, the Finance Vault writes the ledger entry to `schema_finance` AND an event record to an `outbox_events` table in the **exact same database transaction**.
+2.  A lightweight background worker (Laravel Horizon) continuously polls the `outbox_events` table, publishes the payload to Redis (`channel: finance.payment.success`), and marks the outbox record as processed.
+
+**5.4.2 Event Catalogue & Idempotency**
+*   **Event:** `finance.payment.success`
+*   **Payload:** `{"student_id": "PC/MIS/001/2026", "amount": 5000.00, "currency": "ETB", "transaction_id": "TXN_998877", "idempotency_key": "UUID-1234"}`
+*   **Consumer:** Academic Core (SIS Module).
+*   **Action:** Lifts the financial hold on the student's account, allowing course registration.
+*   **Idempotency:** The Academic Core checks Redis for the `idempotency_key`. If it has already processed this UUID, it ignores the event. This prevents double-unlocking or duplicate notifications if Redis replays the message.
+
+**5.4.3 Compensation Sagas (Rollback)**
+If the `finance.payment.success` event fires, but the Academic Core fails to unlock the course (e.g., due to a temporary SIS database lock), the system does not silently fail. 
+*   The Academic Core publishes a `sis.course_unlock.failed` event.
+*   The Finance Vault consumes this event and triggers a **Compensation Saga**: it automatically reverses the wallet credit, initiates a refund to the Telebirr API, and alerts the Finance Officer and Student via SMS that the payment was rejected due to a system enrollment error.
+
+### 5.5 File Storage Bucket Map (MinIO)
+
+All files are stored in MinIO on local NVMe drives. Buckets are strictly segmented by access level and retention policy.
+
+| Bucket Name | Access Level | Encryption | Contents & Retention |
+| :--- | :--- | :--- | :--- |
+| `private/kyc-docs` | Restricted (Red) | AES-256 | National IDs, Applicant photos. Retained 6 months if rejected (then cryptographically wiped), perpetual if enrolled. |
+| `private/exam-snapshots` | Restricted (Red) | AES-256 | Webcam snapshots during exams. Retained for 1 semester (grade dispute window), then permanently deleted. |
+| `private/proctoring-snapshots`| Restricted (Red) | AES-256 | AI-flagged suspicion images. Retained 1 semester. |
+| `private/financial-records` | Restricted (Red) | AES-256 | Manual bank receipt images. Retained 7 years per financial audit laws. |
+| `private/audit-exports` | Restricted (Red) | AES-256 | Generated ETA Compliance Bundles (ZIPs). Retained 5 years. |
+| `public/course-videos` | Public (Green) | None (Served via CDN/Nginx) | HLS transcoded video segments (`.ts`, `.m3u8`). Permanent retention. |
+| `public/course-materials` | Public (Green) | None | Syllabi, public reading lists. Permanent retention. |
+
+### 5.6 Data Classification
+
+To comply with the Ethiopian Data Protection Proclamation, all database columns and file storage objects are tagged with a classification level, which dictates encryption and logging behavior.
+
+*   **Public Green:** Course descriptions, timetables, public announcements. No encryption at rest required. Logged normally.
+*   **Confidential Amber:** Student records, grades, enrollment data, attendance logs. Encrypted at rest via PostgreSQL TDE (Transparent Data Encryption) or application-level encryption. PII auto-redacted in application logs (e.g., Sentry).
+*   **Restricted Red:** National ID numbers, wallet balances, passwords, exam snapshots, audit logs. **Strict AES-256 encryption at rest.** Never written to application logs. Access requires explicit, audited RBAC permissions and MFA.
+
+### 5.7 Data Sovereignty & External API Governance
+
+**5.7.1 The "No External Cloud" Mandate**
+Per Art. 9.5.1 of Directive 806/2013 and national data protection laws, no student PII or institutional financial data may traverse international borders.
+*   The AI Study Assistant (Ollama) runs entirely on the local Primary Node.
+*   Video transcoding (FFmpeg) and document text extraction run locally.
+*   No external cloud services (AWS, Azure, GCP) are used for data processing or storage.
+
+**5.7.2 External API Hooks (e.g., Plagiarism Detection)**
+The system integrates with external services like Turnitin for thesis plagiarism checking (Art. 9.4.4). To maintain data sovereignty and privacy:
+*   **PII Stripping:** Before a document is sent to the Turnitin API, a local middleware strips all metadata, author names, student IDs, and institutional watermarks.
+*   **Anonymized Payload:** Only the raw text content and a randomized, non-reversible document hash are transmitted.
+*   **Result Mapping:** The external API returns a similarity score mapped to the document hash, which the local system then maps back to the specific student's submission record. The external provider never knows the identity of the student or the institution.
+
+---
+
+# PART TWO — SYSTEM ARCHITECTURE (Continued)
+
+# Section 6 — Infrastructure & Compliance Baseline
+
+The physical and network infrastructure of the POC-AMS is designed to guarantee 99.9% uptime, absolute data sovereignty, and strict compliance with the Ethiopian Education and Training Authority (ETA) Directive 806/2013. Because the college operates 100% online, this infrastructure is the *only* physical footprint of the institution's academic delivery.
+
+### 6.1 Server Specification & Resource Allocation
+
+To support the Peak Concurrent User (PCU) load of **500 concurrent exam takers** (heavy database writes) and **50 simultaneous live classrooms** (approx. 2,500 concurrent WebSocket/WebRTC connections), the Primary Node is provisioned with the following production specifications:
+
+*   **Compute:** 32 vCPU (Dedicated cores to prevent noisy-neighbor issues if hosted in a regional data center).
+*   **Memory:** 128GB DDR4 ECC RAM. 
+    *   *Allocation:* 64GB dedicated to PostgreSQL shared buffers and OS cache; 32GB for the Local LLM (Ollama running a 4-bit quantized model); 16GB for Node.js (LiveKit SFU) and PHP-FPM; 16GB for Redis and MinIO.
+*   **Storage:** 4TB NVMe SSD (RAID 10 for redundancy and high IOPS). 
+    *   *IOPS Requirement:* Minimum 10,000 IOPS to handle the concurrent write-load of 500 students submitting exams and logging attendance simultaneously.
+*   **Warm Standby Node:** Identical hardware specification, running in a passive state, hosting the PostgreSQL Streaming Replica and standby Redis/MinIO instances.
+
+### 6.2 Bandwidth Requirements & West Gojjam Connectivity
+
+The system is deployed in Finote Selam, where internet infrastructure, while connected to the national fiber backbone, requires careful provisioning to handle peak academic loads.
+
+*   **Art. 9.5.2 Compliance (Live Classroom Bandwidth):** The directive requires sufficient bandwidth for live sessions. Calculated as: `512 Kbps × 2,500 peak concurrent users = 1.28 Gbps`.
+*   **Art. 9.5.3 Compliance (Web Traffic):** `8 Mbps/sec × 1,000 concurrent website users = 8 Gbps` (burst capacity for public site and API).
+*   **Provisioning Strategy:** The institution must procure a dedicated, symmetric **1 Gbps Enterprise Fiber line** from EthioTelecom, with a secondary 4G/5G LTE failover router (e.g., Huawei or Mikrotik) configured via BGP/OSPF to automatically route critical WebSocket and API traffic if the primary fiber is cut.
+
+### 6.3 Physical Server Room (Art. 9.1.4)
+
+Since there are no physical classrooms, the physical server room is the most critical physical asset of Power College. It must strictly comply with Art. 9.1.4 of the Directive.
+
+*   **Environmental Controls:** Dedicated precision cooling (CRAC unit) maintaining 18°C–27°C and 40%-60% humidity.
+*   **Power Redundancy:** 
+    *   Dual online-conversion UPS units (N+1 redundancy) providing 30 minutes of runtime.
+    *   Diesel backup generator with an Automatic Transfer Switch (ATS) configured to start and take the load within 15 seconds of a grid failure.
+*   **Physical Security & Safety:** Biometric access control (fingerprint) restricted to the System Administrator and Compliance Officer. FM-200 or Novec 1230 clean agent fire suppression system (water sprinklers are strictly prohibited in the server room).
+*   **System Tracking:** The Compliance Officer module contains a digital registry of the Server Room Compliance Certificate, updated annually after physical inspection.
+
+### 6.4 Dedicated Server Mandate (Art. 8.2.12)
+
+*   **No Shared Hosting:** Directive 806/2013 Art. 8.2.12 requires dedicated infrastructure for higher education institutions to ensure performance isolation and security. 
+*   **Implementation:** The POC-AMS runs on bare-metal hardware physically owned by the college and housed in their certified server room, OR on a strictly isolated, single-tenant bare-metal dedicated server leased from an ETA-approved local data center (e.g., EthioTelecom Data Center in Addis Ababa, routed securely to Finote Selam). Virtual Private Servers (VPS) sharing hypervisors with unknown third parties are strictly prohibited.
+
+### 6.5 Network Security & Perimeter Defense
+
+The network perimeter is designed on a "Default Deny" philosophy.
+
+*   **Firewall (UFW/iptables):** `DENY ALL` incoming traffic by default.
+*   **Public Exposure:** Only ports `80` (HTTP, for immediate redirect to HTTPS) and `443` (HTTPS/TLS 1.3) are exposed to the public internet. 
+*   **SSH Access:** Port 22 is blocked from the public internet. SSH access is only permitted via a secure, hardware-key authenticated VPN (e.g., WireGuard or OpenVPN).
+*   **Admin Tooling Isolation:** Critical administrative interfaces—including Laravel Horizon (queue monitoring), MinIO Console, Meilisearch Dashboard, and PostgreSQL admin tools—are **never** exposed on public IPs. They are only accessible to the System Administrator via the internal VPN.
+
+### 6.6 Secrets Management
+
+Hardcoded credentials and plaintext `.env` files in production are a critical security violation.
+
+*   **HashiCorp Vault:** All database passwords, API keys (Telebirr, EthioTelecom SMS), and JWT signing keys are stored in HashiCorp Vault.
+*   **Application Injection:** At boot time, the Laravel and Node.js applications authenticate with Vault via AppRole and dynamically inject secrets into the application's memory environment. 
+*   **Zero Plaintext:** The production server will not contain a `.env` file. If the application code is compromised via directory traversal, no credentials are exposed.
+*   **Rotation Schedule:** Database passwords and API keys are automatically rotated by Vault every 90 days.
+
+### 6.7 Dependency Supply Chain Security
+
+To prevent supply chain attacks (e.g., malicious npm or Composer packages):
+
+*   **Lock File Integrity:** CI/CD pipelines strictly enforce `npm ci` and `composer install --no-dev`. Any mismatch between `package-lock.json`/`composer.lock` and the manifest files triggers an immediate build failure.
+*   **Automated CVE Scanning:** Tools like Snyk or Dependabot are integrated into the Git repository. 
+*   **Deployment Block:** If a Critical or High severity CVE is detected in any dependency, the CI pipeline blocks the deployment to production until the package is patched or an explicit risk-acceptance waiver is signed by the System Architect.
+
+### 6.8 Backup Strategy (3-2-1 Rule)
+
+Data loss is unacceptable. The backup strategy strictly adheres to the 3-2-1 rule: 3 copies of data, on 2 different media types, with 1 copy offsite.
+
+*   **Hourly WAL Archiving:** PostgreSQL Write-Ahead Logs (WAL) are continuously archived using `wal-g` to a local encrypted backup drive. This ensures an RPO (Recovery Point Objective) of exactly 1 hour.
+*   **Daily Full Snapshots:** Every day at 1:00 AM EAT, a full encrypted filesystem snapshot (`pg_basebackup` + LVM snapshot) is taken.
+*   **Offsite Replication:** The daily encrypted snapshot is securely rsync'd over a dedicated VPN tunnel to a secondary, geographically distinct backup server (e.g., at a partner institution or secondary data center in Addis Ababa).
+*   **Retention:** 30-day rolling retention for daily snapshots. Monthly snapshots are retained for 7 years for financial/academic audit compliance.
+
+### 6.9 Recovery Targets
+
+*   **RPO (Recovery Point Objective):** 1 Hour. In a worst-case catastrophic failure, the maximum data lost is the last 60 minutes of transactions (recoverable via WAL replay).
+*   **RTO (Recovery Time Objective):** 4 Hours. The system is architected to be fully restored and serving students within 4 hours of a total primary node destruction.
+
+### 6.10 Warm Standby Promotion Runbook
+
+To ensure the RTO is achievable, the Warm Standby node is not a "set and forget" backup; it is an actively tested failover mechanism.
+
+*   **Streaming Replica:** The standby node runs a PostgreSQL streaming replica that is always within milliseconds of the primary.
+*   **Promotion Procedure:** In the event of primary failure, the System Administrator executes the `promote_standby.sh` script. This breaks the replication, promotes the standby DB to primary, updates the Keepalived floating IP to point to the standby's MAC address, and restarts the Laravel/Node services. Target time: **< 30 minutes**.
+*   **Quarterly Game Day:** Every three months, during the maintenance window, the team simulates a total primary node failure. The System Administrator must successfully promote the Warm Standby and verify all system functions. The results are logged in the ETA Compliance Bundle as proof of disaster recovery readiness.
+
+### 6.11 Maintenance Windows & Student Notification
+
+System updates, OS patching, and database vacuuming require downtime.
+
+*   **Scheduled Window:** All non-emergency maintenance is strictly confined to **Sundays between 2:00 AM and 4:00 AM EAT**, when system traffic is at its absolute lowest.
+*   **Art. 9.5.5 Notification Mandate:** The directive requires advanced notice of system downtime. 
+*   **Automated Workflow:** 24 hours before the maintenance window, a Laravel Horizon cron job triggers the Communication Service. It sends an SMS (via EthioTelecom) and an Email to all active students and staff: *"Power College System Notice: The academic portal will undergo scheduled maintenance on Sunday from 2:00 AM to 4:00 AM. Please plan your studies accordingly."* The delivery status of these messages is logged in the audit trail to prove compliance to ETA inspectors.
+
+---
+
+# PART THREE — USER ROLES AND ACCESS CONTROL
+
+# Section 7 — RBAC Architecture
+
+The Role-Based Access Control (RBAC) architecture of the POC-AMS is the primary defense mechanism against internal fraud, academic manipulation, and unauthorized data access. Because the system is 100% online and lacks physical security guards to monitor administrative actions, the software itself must act as the uncompromising enforcer of institutional policy and ETA Directive 806/2013.
+
+### 7.1 Principle of Least Privilege (PoLP)
+
+**Requirement:** Every user, service account, and API token must be granted only the absolute minimum level of access necessary to perform their specific, defined duties.
+
+*   **Endpoint Gating:** Every API route in the Laravel Academic Core and Finance Vault is protected by strict Middleware policies. If a user's role does not explicitly include the `permission:finance.wallet.credit` flag, the request is rejected with a `403 Forbidden` before it even reaches the controller logic.
+*   **UI Element Masking:** The Next.js frontend dynamically renders or hides UI elements (buttons, forms, data tables) based on the user's JWT claims. A student viewing a grade report will not even receive the HTML/JSON for the "Edit Grade" button.
+*   **Database Level Enforcement:** As defined in Section 5.2, the application connects to PostgreSQL using role-specific users (e.g., `user_finance`). Even if an attacker bypasses the application logic and achieves SQL injection in the Academic Core, the database will reject any query attempting to read or write to `schema_finance`.
+
+### 7.2 Separation of Duties (SoD)
+
+**Requirement:** No single role can initiate AND approve a high-risk, irreversible action. The system architecture inherently prevents conflicts of interest and unilateral manipulation of academic or financial records.
+
+*   **Academic SoD:** An Instructor can *draft* and *submit* grades for their assigned sections. However, they cannot *approve* or *lock* those grades. Only the Head of Department (HoD) can approve, and only the Registrar can lock.
+*   **Financial SoD:** A Finance Officer can *verify* a manual bank receipt and *initiate* a wallet credit. However, they cannot *approve* their own verification. If the credit exceeds the threshold, it requires a second, distinct approval.
+*   **System SoD:** The System Administrator manages infrastructure, server health, and backups. They have **zero access** to read student grades, alter financial balances, or view KYC National ID documents. Conversely, the Registrar and Finance Officers have no access to server configurations or database backups.
+
+### 7.3 The Four-Eyes Principle (Maker-Checker)
+
+**Requirement:** For critical state changes, the system mandates a "Maker-Checker" workflow. The user who initiates the action (Maker) and the user who approves it (Checker) must be distinct individuals, and the system must cryptographically prove they used separate login sessions.
+
+*   **Defined High-Risk Actions:**
+    *   Grade changes after the `REGISTRAR_LOCKED` state.
+    *   Manual wallet adjustments or refunds exceeding 5,000 ETB.
+    *   Reversal of an academic expulsion or disciplinary action.
+    *   Modification of the academic calendar after the semester has started.
+*   **Session Verification:** When the Checker logs in to approve the Maker's request, the system checks the `session_id` in Redis. If the `session_id` belongs to the same `user_id` that initiated the request, the approval is rejected with the error: *"Four-Eyes Violation: Approver cannot be the Initiator."*
+*   **Audit Trail:** Both the initiation and the approval are recorded as distinct, hash-chained entries in `schema_audit`.
+
+### 7.4 Hash-Chained Append-Only Audit Log
+
+**Requirement:** To satisfy the ETA's requirement for tamper-evident records (Art. 11), the system utilizes a cryptographic hash chain for all critical events.
+
+*   **Mechanism:** Every time a critical event occurs (e.g., grade change, payment, login), the system generates a log entry containing the event data, timestamp, user ID, and IP address. 
+*   **The Chain:** The system calculates the `SHA-256` hash of the *current* event's payload combined with the `hash` of the *previous* event. 
+*   **Immutability:** This creates an unbreakable chain. If a rogue Database Administrator attempts to alter a grade change record from three months ago, the hash of that altered record will change. This breaks the chain for every subsequent record. 
+*   **Nightly Integrity Check:** A cron job runs at midnight EAT, recalculating the hash chain from the genesis block. If a broken link is detected, the system immediately triggers a P1 Incident Response, freezes all academic and financial modifications, and alerts the Board Chair and Compliance Officer.
+
+### 7.5 Root Authority (Multi-Signature Break-Glass)
+
+**Requirement:** Certain catastrophic or system-altering actions require consensus from the highest levels of institutional leadership to prevent a single compromised executive account from destroying the system.
+
+*   **The 2-of-3 Rule:** Actions such as "Wipe Finance Ledger," "Reset Audit Chain," or "Emergency System Shutdown" require cryptographic approval from at least **two of the following three roles**:
+    1.  Board Chair
+    2.  Academic Dean
+    3.  Chief Financial Officer (CFO)
+*   **Implementation:** When a Root Action is initiated, the system generates a secure, time-limited token. The initiating executive shares this token out-of-band (e.g., via a secure physical meeting or encrypted communication) with a second executive. Both must authenticate via their hardware MFA keys to sign the transaction.
+
+### 7.6 Session Policy & Concurrency Limits
+
+**Requirement:** Session management must balance security for staff with usability for students accessing the 100% online platform from various devices.
+
+*   **Staff Roles (Strict):** Limited to **one active session** at a time. If an Instructor logs in on their laptop, and then logs in on their phone, the laptop session is immediately invalidated in Redis. This prevents credential sharing and ensures that if a staff member's account is compromised, the legitimate user can regain control simply by logging in again.
+*   **Student Roles (Flexible):** Limited to **two concurrent sessions**. This acknowledges the reality of the 100% online model, where a student might be watching a LiveKit lecture on their laptop while simultaneously checking the Digital Library or chatting on their mobile phone. A third login attempt will invalidate the oldest session.
+*   **Absolute Timeout:** All sessions (staff and student) are hard-terminated after 12 hours of inactivity, requiring a fresh login and MFA challenge.
+
+### 7.7 Multi-Factor Authentication (MFA)
+
+**Requirement:** Passwords alone are insufficient to protect PII and financial data.
+
+*   **TOTP Mandatory for Staff:** All staff roles (Instructor, Registrar, Finance Officer, System Admin, etc.) must enroll a Time-based One-Time Password (TOTP) authenticator app (e.g., Google Authenticator, Authy, or 1Password) upon their first login. 
+*   **Enforcement:** The system will not allow a staff member to access any functional module until MFA is successfully verified. 
+*   **Student MFA:** MFA is optional but highly encouraged for students via SMS OTP. However, if a student enables MFA, it becomes mandatory for all future logins.
+
+### 7.8 Account Lockout & Brute Force Protection
+
+**Requirement:** Protect the system against credential stuffing and brute-force attacks without causing accidental Denial of Service (DoS) for legitimate users.
+
+*   **Progressive Lockout:** 
+    *   **Attempts 1-4:** Failed login attempts are logged, but the user can retry immediately.
+    *   **Attempt 5:** The account is locked for **10 minutes**. An email notification is sent to the account owner.
+    *   **Consecutive Lockouts:** If an account triggers the 10-minute lockout **three times in a 24-hour period**, the account status is changed to `FROZEN`.
+*   **Compliance Alert:** When an account is `FROZEN`, an automated SMS and Email alert is sent to the Compliance Officer and the System Administrator, detailing the IP addresses and device fingerprints associated with the failed attempts. Only the Compliance Officer can unfreeze the account after verifying the user's identity.
+
+### 7.9 Administrative Isolation (VPN-Only Access)
+
+**Requirement:** Backend infrastructure and administrative tooling must never be exposed to the public internet.
+
+*   **Public vs. Private:** The Next.js frontend and the public API endpoints (`/api/public/*`) are the only services listening on ports 80/443.
+*   **Admin Tooling:** Interfaces like Laravel Horizon (queue management), MinIO Console (file storage), Meilisearch Dashboard, and PostgreSQL Adminer are strictly bound to the `127.0.0.1` (localhost) or internal private IP interfaces.
+*   **VPN Mandate:** To access these administrative tools, the System Administrator and authorized DevOps personnel must first connect to the institution's WireGuard/OpenVPN server. The Nginx reverse proxy is configured to only route requests to these admin panels if the source IP matches the internal VPN subnet (e.g., `10.8.0.0/24`).

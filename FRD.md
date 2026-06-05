@@ -255,3 +255,62 @@ The success of the POC-AMS deployment will be measured against the following str
 3.  **Performance Under Peak Load:** The system must support 500 concurrent exam takers with **< 500ms API latency** and **zero dropped WebSocket connections** during the exam window.
 4.  **Proactive Renewal Automation:** The system must automatically alert the Board **180 days** before license expiry, and auto-assemble the draft renewal evidence package **90 days** before expiry, ensuring the Art. 10.2 deadline is never missed.
 5.  **Zero Financial Variance:** The nightly reconciliation between the Student Wallet ledger and the Telebirr/CBE Birr bank APIs must show a variance of **0.00 ETB**. Any variance > 0.01 ETB triggers an immediate P1 alert to the CFO.
+---
+# PART TWO — SYSTEM ARCHITECTURE
+
+# Section 3 — Architectural Decision Record
+
+### 3.1 Architectural Pattern: Domain-Separated Monolith
+
+**Decision:**
+The POC-AMS will be built using a **Domain-Separated Monolith** architecture. The system will be deployed as a single, cohesive application unit, but the codebase and database will be strictly partitioned into isolated bounded contexts (Academic Core, Finance Vault, Real-Time Engine, and AI Satellite). 
+
+**Rationale — Why Not Microservices for Phase 1?**
+While microservices offer independent scaling and deployment, they introduce massive DevOps overhead, distributed tracing complexity, and network latency. For a Phase 1 launch targeting 500 students in Finote Selam, the operational cost of managing a Kubernetes cluster, service meshes, and distributed transaction sagas outweighs the benefits. Furthermore, network latency between microservices could degrade the real-time experience of the Live Classroom and Proctoring modules.
+
+**Rationale — Why Not a Pure Monolith?**
+A traditional "big ball of mud" monolith is unacceptable for this project due to the strict regulatory and security requirements of Directive 806/2013. Financial data (Student Wallets) and Academic data (Grades, Exams) must never share the same memory space, database schema, or application logic pathways. A pure monolith risks accidental data leakage and makes it impossible to enforce the "Separation of Duties" at the database level.
+
+**Accepted Tradeoffs:**
+*   **Deployment Coupling:** A bug in the LMS module requires redeploying the entire application, including the Finance Vault. *Mitigation:* Strict CI/CD pipelines, comprehensive automated testing, and feature flags.
+*   **Resource Contention:** A memory leak in the Real-Time Engine could crash the Academic Core. *Mitigation:* The Real-Time Engine is isolated as a separate Node.js process managed by PM2, ensuring process-level isolation even within the same physical server.
+
+### 3.2 Physical Topology & High Availability
+
+To satisfy the 99.9% uptime SLA (Art. 9.5.5) and ensure zero data loss during final exams, the physical infrastructure is designed with a Primary/Warm Standby topology.
+
+**3.2.1 Primary Node (Active)**
+*   **Hardware:** Single high-spec bare-metal server or enterprise VPS (Minimum 16 vCPU, 64GB RAM, 2TB NVMe SSD).
+*   **OS:** Ubuntu 22.04 LTS.
+*   **Workload:** Hosts the Nginx ingress, Laravel Academic Core (PHP-FPM), Node.js Real-Time Engine, Python AI Satellite, PostgreSQL Primary, Redis Primary, and MinIO storage.
+*   **Location:** Physically hosted in an ETA-certified data center within Ethiopia to guarantee Data Sovereignty (Art. 9.5.1).
+
+**3.2.2 Warm Standby Node (Passive/Replica)**
+*   **Hardware:** Identical specification to the Primary Node.
+*   **Workload:** Hosts a **PostgreSQL Streaming Replica** (synchronous or semi-synchronous commit to ensure RPO = 0 for financial transactions). Hosts standby instances of Redis and MinIO.
+*   **Failover Mechanism:** Managed via a floating IP or lightweight load balancer (e.g., HAProxy/Keepalived). In the event of Primary node hardware failure, the System Administrator executes the Warm Standby Promotion Runbook (Appendix G) to promote the replica to Primary in under 30 minutes.
+
+### 3.3 Scaling Path & Evolution Strategy
+
+The architecture is designed to evolve without requiring a complete rewrite. The Domain-Separated Monolith allows us to physically extract specific domains into independent microservices as the student population grows.
+
+*   **Year 1 (Current State):** Domain-Separated Monolith on Primary + Warm Standby. Supports up to 500 concurrent exam takers.
+*   **Year 2 (Real-Time Extraction):** As live classroom usage scales, the Node.js + LiveKit WebRTC SFU engine will be physically extracted to its own dedicated cluster. WebRTC is highly CPU and bandwidth-intensive; isolating it ensures that a spike in live video traffic does not starve the Academic Core of resources.
+*   **Year 3 (Finance Vault Extraction):** The Finance Vault will be extracted into a completely separate, highly secured microservice with its own dedicated database server. This provides maximum physical isolation for financial data and allows independent scaling of transaction processing.
+*   **Year 3+ (Curriculum Expansion):** The Academic Core's curriculum module will be expanded to support Master's degree programs. This will introduce new database relationships for thesis supervision (1:3 ratio) and defense scheduling, without altering the core SIS or Finance logic.
+
+### 3.4 Data Sovereignty & Network Routing
+
+**3.4.1 The "No External Cloud" Mandate**
+Per Art. 9.5.1 and the Ethiopian Data Protection Proclamation, no student PII, exam content, or financial data may traverse international borders or be processed by foreign cloud AI. 
+*   **AI Satellite:** The AI Study Assistant uses Ollama to run a local Large Language Model (LLM) directly on the Primary Node's GPU/CPU. It queries a local `pgvector` database. It has zero internet access.
+*   **Video Transcoding:** FFmpeg processes all uploaded lecture videos locally on the Primary Node. No external APIs (like AWS Elemental) are used.
+
+**3.4.2 Ingress and Traffic Routing**
+All external traffic enters through Nginx on the Primary Node. Nginx acts as a reverse proxy, terminating SSL/TLS and routing requests based on URL paths:
+*   `/api/finance/*` → Routes to the isolated Finance Vault application port.
+*   `/api/academic/*`, `/api/sis/*` → Routes to the Laravel Academic Core.
+*   `/ws/*`, `/live/*` → Routes to the Node.js Real-Time Engine (WebSocket upgrade).
+*   `/api/ai/*` → Routes to the Python FastAPI AI Satellite.
+
+This routing ensures that even though the services run on the same physical server, they communicate over `localhost` via strict HTTP/gRPC boundaries, mimicking microservice network isolation without the external network overhead.

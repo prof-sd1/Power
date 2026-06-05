@@ -173,3 +173,86 @@ This FRD is an active operational tool utilized by various stakeholders througho
 *   **Compliance Officer & ETA Inspectors:** Uses the Audit & Compliance section and the Appendix F (Compliance Matrix) to verify that the system's "One-Click ETA Bundle" contains the exact data points required by law. They rely on this document to prove to the ETA that the software inherently enforces Directive 806/2013.
 *   **CFO & Finance Officer:** Uses the Finance Vault section to verify the double-entry ledger logic, the 5,000 ETB four-eyes threshold, and the Telebirr reconciliation workflows.
 *   **Internal/External Auditors:** Uses the Security and Data Privacy sections during annual reviews to verify that PII is encrypted at rest (AES-256), that the hash-chained audit log cannot be tampered with, and that data retention cron jobs (e.g., wiping rejected applicants after 6 months) are executing correctly.
+---
+# PART ONE — FOUNDATION (Continued)
+
+## Section 2 — Institutional Context
+
+### 2.1 Institution Profile
+
+**Power Online College (Power College)** is a private higher education institution established in **2006**, located in **Finote Selam Town, West Gojjam Zone, Amhara Region, Ethiopia**. 
+
+**Operational & Geographic Context:**
+Unlike institutions based in the capital city of Addis Ababa, Power College operates in a regional secondary city. While national fiber connectivity has reached Finote Selam, the local infrastructure does not possess the Tier-1 data center density, redundant ISP routing, or uninterrupted power grids of the capital. 
+*   **System Implication:** This geographical and infrastructural reality is a primary driver of the system’s architecture. It mandates the requirement for an on-premises physical server room (Art. 9.1.4) with independent power, aggressive low-bandwidth optimizations in the frontend (Section 23), and offline-capable content delivery mechanisms. 
+*   **Zero Physical Student Footprint:** Despite having a physical administrative and server location in Finote Selam, the institution operates with **zero physical student footprint**. Students never attend physical classes, visit a physical library, or take physical exams. The physical campus exists solely to house the IT infrastructure and administrative staff required to deliver the 100% online educational experience.
+
+### 2.2 Current Accredited Online Programs
+
+The system is explicitly scoped to manage the full academic lifecycle for three specific undergraduate programs. The database schemas for `curricula`, `courses`, and `programs` will be strictly constrained to these disciplines:
+
+1.  **Bachelor of Arts (BA) in Management Information Systems (MIS)**
+2.  **Bachelor of Arts (BA) in Accounting and Finance**
+3.  **Bachelor of Arts (BA) in Management**
+
+**Constraint:** The system architecture will not include data models for diploma programs, TVET certifications, or postgraduate/master's degrees in Phase 1. Any attempt to configure a program outside of these three will be blocked by the System Administrator validation rules. All three programs are delivered **100% online**.
+
+### 2.3 Regulatory Position & License Renewal Track
+
+Power College is an **existing license holder** operating under the renewal track defined in **Article 10 of Directive 806/2013**. 
+
+**Critical Compliance Timeline:**
+*   Per **Art. 10.2**, the institution must submit its renewal application within **90 days prior to the expiry** of its current license.
+*   **System Implication:** The POC-AMS is not merely an operational tool; it is a regulatory survival mechanism. The "One-Click ETA Compliance Bundle" (detailed in Section 19) must be fully operational, stress-tested, and generating accurate reports at least **six months** before the current license expires. This provides the Compliance Officer ample time to review the auto-generated data, rectify any institutional discrepancies, and prepare the physical document package for the ETA.
+
+### 2.4 Delivery Model — The 100% Online Advantage
+
+Power College operates under a strict **100% online delivery model**. There are no exceptions, no hybrid options, and no physical classroom fallbacks. 
+
+**Directive Context & System Logic:**
+*   **Art. 8.3.10** of Directive 806/2013 mandates that for a program to be classified as online/distance learning, a minimum of **60% of its contact hours** must be delivered online.
+*   **The Architectural Advantage:** By hardcoding `delivery_mode = 'ONLINE'` at the database level for all courses, sections, and exams, Power College mathematically guarantees a **100% online delivery ratio**. 
+*   **Provability:** It is not enough to simply be 100% online; the system must *prove* it to the ETA. The Online Delivery Compliance Module (Section 11) will continuously calculate and log the ratio of `Digital_Hours_Delivered / Total_Hours_Scheduled`. Because the system lacks a physical classroom module, this ratio will perpetually equal 1.0 (100%), automatically satisfying the statutory requirement and generating an unassailable, mathematically verifiable audit trail for inspectors.
+
+### 2.5 Student Population Projections & Capacity Planning
+
+The infrastructure, database sizing (detailed in Appendix D), and load-testing protocols are engineered to support the following growth trajectory:
+
+*   **Year 1 (Baseline):** ~500 active students. The system will run on a single high-spec primary node with a warm standby.
+*   **Year 3 (Growth):** ~1,500 active students. Triggers the need for database read-replicas and scaling the LiveKit WebRTC SFU cluster.
+*   **Year 5 (Scale):** ~3,000+ active students. Triggers the architectural split of the Finance Vault and Real-Time Engine into separate microservices (as defined in Section 3.3).
+
+**Peak Concurrent User (PCU) Sizing:**
+Regardless of total enrollment, the system must be stress-tested to handle the following simultaneous loads without degradation:
+1.  **500 concurrent exam takers** (high database write/load, strict browser lockdown, and AI proctoring requirements).
+2.  **2,500 concurrent live classroom attendees** (assuming 50 simultaneous sections of 50 students each, driving heavy WebSocket and media server load).
+
+### 2.6 Institutional Pre-Conditions (Non-System Dependencies)
+
+The POC-AMS software cannot compensate for institutional non-compliance. The following legal, financial, and physical prerequisites must be resolved by the College Board and Legal Counsel **independently of the system build**. The system will track the status of these items but will not fulfill them.
+
+**2.6.1 Financial Guarantee Bond (Art. 8.1.5)**
+*   **Requirement:** The institution must maintain a blocked bank guarantee of **ETB 500,000** in a recognized Ethiopian bank.
+*   **System Tracking:** The Compliance Officer module will include a field to upload the bond certificate, record the issuing bank, and track the expiry date. The system will alert the CFO 60 days before the bond requires renewal.
+
+**2.6.2 IT Infrastructure Installation Certificate (Art. 9.1.5)**
+*   **Requirement:** The college's IT setup must be inspected and certified by the ETA/INSA.
+*   **System Gate:** The System Administrator will be technically blocked from switching the application from `Staging` to `Production` mode until a valid, unexpired IT Infrastructure Certificate is uploaded and verified in the system settings.
+
+**2.6.3 Physical Server Room Compliance (Art. 9.1.4)**
+*   **Requirement:** The institution must provide a dedicated, physically secure server room with independent UPS, backup generator, fire suppression, and climate control. *(Note: This is the only physical infrastructure in the system; students and instructors never interact with it).*
+*   **System Tracking:** The system will store the digital compliance certificate for the server room. In the event of an ETA inspection, the Compliance Officer can instantly produce this certificate alongside the digital server uptime logs.
+
+**2.6.4 Historical Compliance Evidence Reconstruction**
+*   **Requirement:** To renew the license, the ETA requires evidence of compliance for the *past 3-year license period*. The new POC-AMS will only have data from its go-live date forward.
+*   **System Solution:** The system includes a **Historical Reconstruction Module** (Section 11.5). This is an admin-only interface where the Registrar can manually input or CSV-upload past semester data (attendance, grades, delivery ratios). The system will format this historical data into the exact same digitally signed compliance bundle structure as live data, ensuring a continuous, unbroken 3-year evidence trail for the renewal application.
+
+### 2.7 System Success Metrics & KPIs
+
+The success of the POC-AMS deployment will be measured against the following strict Key Performance Indicators:
+
+1.  **100% Audit Trail Coverage:** Every state change in the SIS, Finance Vault, and LMS must have a corresponding hash-chained entry in `schema_audit`. There will be zero exceptions. If the audit chain breaks, the system is considered in a critical failure state.
+2.  **One-Click ETA Bundle Generation:** The Compliance Officer must be able to generate the full, digitally signed renewal evidence package in **< 60 seconds** at any time, with zero manual data compilation required.
+3.  **Performance Under Peak Load:** The system must support 500 concurrent exam takers with **< 500ms API latency** and **zero dropped WebSocket connections** during the exam window.
+4.  **Proactive Renewal Automation:** The system must automatically alert the Board **180 days** before license expiry, and auto-assemble the draft renewal evidence package **90 days** before expiry, ensuring the Art. 10.2 deadline is never missed.
+5.  **Zero Financial Variance:** The nightly reconciliation between the Student Wallet ledger and the Telebirr/CBE Birr bank APIs must show a variance of **0.00 ETB**. Any variance > 0.01 ETB triggers an immediate P1 alert to the CFO.

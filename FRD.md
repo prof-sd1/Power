@@ -314,3 +314,99 @@ All external traffic enters through Nginx on the Primary Node. Nginx acts as a r
 *   `/api/ai/*` → Routes to the Python FastAPI AI Satellite.
 
 This routing ensures that even though the services run on the same physical server, they communicate over `localhost` via strict HTTP/gRPC boundaries, mimicking microservice network isolation without the external network overhead.
+
+---
+
+# PART TWO — SYSTEM ARCHITECTURE (Continued)
+
+# Section 4 — Technology Stack
+
+The selection of the technology stack for POC-AMS is not driven by trends, but by strict adherence to the project's core constraints: **100% online delivery, absolute data sovereignty, high concurrency for exams/live classes, and resilience against the infrastructural realities of Finote Selam.** Every tool chosen below serves a specific regulatory or operational mandate.
+
+### 4.1 Frontend — Next.js 14 (App Router)
+**Scope:** Student Portal, Staff Portal, Public-Facing Admissions Site.
+
+*   **Rationale:** Next.js 14 with React Server Components (RSC) is selected to aggressively minimize the client-side JavaScript bundle size. For a 100% online college in West Gojjam, where students may be accessing the system via 3G mobile networks or unstable broadband, a heavy Single Page Application (SPA) is unacceptable. RSC allows the server to render the UI and send minimal HTML/JSON over the wire, drastically reducing Time-to-Interactive (TTI) on low-end devices.
+*   **Public Site:** Replaces the existing `power-college.com`. Utilizes Static Site Generation (SSG) for blazing-fast load times and SEO optimization for student recruitment.
+*   **Portals:** Utilizes Server Actions for secure, direct database mutations without exposing API endpoints to the client, reducing the attack surface for Cross-Site Request Forgery (CSRF).
+
+### 4.2 Academic Core — Laravel 11
+**Scope:** Authentication, SIS, Curriculum, Exams, Library, AI Tutor orchestration.
+
+*   **Rationale:** Laravel provides a mature, highly secure, and expressive ecosystem for complex relational data. The Academic Core manages the most intricate business logic in the system (e.g., prerequisite chains, graduation audits, grade lifecycles). Laravel’s Eloquent ORM, built-in queue system, and robust authorization gates (Policies) accelerate development while enforcing strict security boundaries.
+*   **Version:** Laravel 11 (PHP 8.3) is utilized for its performance optimizations, fiber-based concurrency, and streamlined application structure.
+
+### 4.3 Finance Vault — Laravel 11 (Isolated Application)
+**Scope:** Student Wallets, Payment Processing, Double-Entry Ledger, Financial Audit.
+
+*   **Rationale:** The Finance Vault is **not** a module within the Academic Core; it is a completely separate Laravel application with its own codebase, its own database schema (`schema_finance`), and its own deployment process. 
+*   **Strict Isolation:** The Finance Vault knows *nothing* about grades, courses, or attendance. It only understands `transactions`, `wallets`, and `ledgers`. This enforces the "Separation of Duties" at the code level. If the Academic Core is compromised, the attacker cannot manipulate financial balances because the Academic Core application literally does not have the code to do so.
+*   **Database Transactions:** Heavily utilizes Laravel’s `DB::transaction()` to ensure ACID compliance for every single credit and debit.
+
+### 4.4 Real-Time Engine — Node.js 20 + Socket.io + LiveKit SDK
+**Scope:** Live Classroom (WebRTC), Real-time Chat, System Notifications.
+
+*   **Rationale:** Node.js’s event-driven, non-blocking I/O model is the industry standard for managing thousands of concurrent, persistent WebSocket connections. 
+*   **LiveKit SFU:** We utilize LiveKit as our self-hosted Selective Forwarding Unit (SFU) for WebRTC. This is the backbone of the 100% online delivery model. By self-hosting LiveKit, we guarantee sub-200ms latency for live lectures and ensure that no video/audio data routes through third-party cloud servers, maintaining strict data sovereignty.
+*   **Socket.io:** Handles fallback mechanisms for clients behind strict corporate or local ISP firewalls that block raw WebRTC, ensuring no student is locked out of live notifications or chat.
+
+### 4.5 AI Satellite — Python FastAPI + LangChain + Ollama + pgvector
+**Scope:** AI Study Assistant, Course Material Embeddings, RAG (Retrieval-Augmented Generation).
+
+*   **Rationale:** Python is the undisputed language of AI. FastAPI provides asynchronous, high-performance endpoints for the AI queries.
+*   **Ollama (Local LLM):** This is a critical compliance component. We run a quantized open-source LLM (e.g., Llama-3-8B) locally via Ollama. **No student prompts or course data are ever sent to OpenAI, Anthropic, or any external API.** This guarantees 100% compliance with the Ethiopian Data Protection Proclamation regarding PII and data sovereignty.
+*   **pgvector:** Stores the vector embeddings of all course materials (PDFs, transcripts). The AI uses RAG to answer student questions, ensuring it only answers based on the official syllabus and never hallucinates external information.
+
+### 4.6 Database — PostgreSQL 16
+**Scope:** The single source of truth for all relational and structured data.
+
+*   **Rationale:** PostgreSQL is selected for its strict ACID compliance, advanced indexing, and robust JSONB support. 
+*   **Multi-Schema Architecture:** We utilize a single PostgreSQL cluster but enforce strict logical isolation using schemas (`schema_auth`, `schema_sis`, `schema_finance`, `schema_audit`, `schema_lms`). Database roles are restricted at the connection level (e.g., the `user_finance` database user physically cannot execute queries against `schema_sis`).
+*   **High Availability:** Configured with a Streaming Replica on the Warm Standby node to ensure an RPO (Recovery Point Objective) of near-zero for financial and academic records.
+
+### 4.7 Cache and Queue — Redis 7
+**Scope:** Session management, background jobs, real-time event bus, security token blacklisting.
+
+*   **Rationale:** Redis provides sub-millisecond in-memory data storage.
+*   **Use Cases:**
+    *   **Laravel Horizon:** Manages background jobs (e.g., video transcoding, email dispatch, nightly reconciliation).
+    *   **Pub/Sub:** Acts as the event bus for the Domain-Separated Monolith. When the Finance Vault processes a payment, it publishes a `payment.success` event to Redis, which the Academic Core listens to in order to unlock the student's course.
+    *   **Security:** Stores the JWT token blacklist. When a user logs out or changes their password, their token is instantly blacklisted in Redis, preventing replay attacks.
+    *   **Idempotency:** Stores webhook transaction IDs for 24 hours to prevent double-crediting a student's wallet if Telebirr sends the same webhook twice.
+
+### 4.8 File Storage — MinIO
+**Scope:** Storage for all uploaded documents, KYC IDs, exam snapshots, video lectures, and financial receipts.
+
+*   **Rationale:** MinIO is a high-performance, S3-compatible object storage server. 
+*   **Data Sovereignty:** Instead of using AWS S3 or external cloud storage, MinIO runs directly on the Primary Node’s local NVMe drives. All PII, exam content, and financial records remain physically inside the institution's ETA-certified server room.
+*   **Security:** Configured with Server-Side Encryption (SSE) using AES-256. Access to buckets (e.g., `private/exam-snapshots`) is strictly controlled via pre-signed URLs that expire after 15 minutes.
+
+### 4.9 Search — Meilisearch
+**Scope:** Full-text search for the Digital Library (Art. 9.5.11).
+
+*   **Rationale:** Meilisearch is chosen over Elasticsearch for its lightweight footprint, blazing-fast sub-50ms response times, and out-of-the-box typo tolerance (crucial for users searching with mixed English/Amharic spellings). It indexes the text extracted from thousands of PDFs and ePUBs in the digital library, allowing students to find specific concepts across all course materials instantly.
+
+### 4.10 Media Pipeline — FFmpeg
+**Scope:** Video transcoding, adaptive bitrate streaming, audio extraction.
+
+*   **Rationale:** When an instructor uploads a raw 1080p lecture video, it is passed to a background worker running FFmpeg.
+*   **Adaptive Bitrate (ABR):** FFmpeg transcodes the video into HLS (HTTP Live Streaming) format, generating multiple quality tiers (360p, 720p, 1080p). 
+*   **Low-Bandwidth Optimization:** This is critical for the 100% online model in Finote Selam. If a student's internet connection drops, the video player automatically switches to the 360p stream, preventing buffering and ensuring the student can still accumulate the required "time-on-task" for attendance compliance.
+
+### 4.11 Process Management
+**Scope:** Keeping the application services alive and managing background workers.
+
+*   **PM2:** Manages the Node.js Real-Time Engine. Provides zero-downtime restarts, log aggregation, and automatic crash recovery.
+*   **Supervisor:** Manages the Laravel queue workers (Horizon). If a worker crashes while processing a video transcode or sending an SMS, Supervisor instantly restarts it.
+*   **Systemd:** The native Linux service manager used to ensure PostgreSQL, Redis, and MinIO start automatically on server boot and are monitored for health.
+
+### 4.12 Ingress — Nginx
+**Scope:** The front door of the entire system. Reverse proxy, SSL termination, security enforcement.
+
+*   **Rationale:** Nginx is the most battle-tested web server for high-concurrency environments.
+*   **SSL Termination:** Enforces TLS 1.3 exclusively. Nginx holds the SSL certificates and handles the encryption/decryption, offloading this CPU-intensive task from the application servers.
+*   **Internal API Gateway:** Nginx routes traffic based on URL paths. 
+    *   `api.powercollege.edu.et/finance/*` routes to the Finance Vault port.
+    *   `api.powercollege.edu.et/academic/*` routes to the Academic Core port.
+    *   `live.powercollege.edu.et/*` routes to the Node.js WebSocket port.
+*   **Security & Rate Limiting:** Nginx enforces strict rate limiting (e.g., max 60 requests/minute per IP for login endpoints) to mitigate brute-force attacks and DDoS. It also injects mandatory HTTP security headers (Content Security Policy, X-Frame-Options: DENY, Referrer-Policy) into every response.

@@ -697,3 +697,125 @@ The Role-Based Access Control (RBAC) architecture of the POC-AMS is the primary 
 *   **Public vs. Private:** The Next.js frontend and the public API endpoints (`/api/public/*`) are the only services listening on ports 80/443.
 *   **Admin Tooling:** Interfaces like Laravel Horizon (queue management), MinIO Console (file storage), Meilisearch Dashboard, and PostgreSQL Adminer are strictly bound to the `127.0.0.1` (localhost) or internal private IP interfaces.
 *   **VPN Mandate:** To access these administrative tools, the System Administrator and authorized DevOps personnel must first connect to the institution's WireGuard/OpenVPN server. The Nginx reverse proxy is configured to only route requests to these admin panels if the source IP matches the internal VPN subnet (e.g., `10.8.0.0/24`).
+
+---
+
+# PART THREE — USER ROLES AND ACCESS CONTROL (Continued)
+
+# Section 8 — Role Definitions
+
+This section defines the exact lifecycle, permissions, constraints, and regulatory gates for every user role within the POC-AMS. Because the institution operates 100% online, these digital roles replace all physical administrative functions. Every role is bound by the Principle of Least Privilege (Section 7.1) and the strict separation of duties required by Directive 806/2013.
+
+### 8.1 Applicant
+**Lifecycle & Scope:** 
+The Applicant role is the entry point into the system. It exists from the moment a prospective student registers on the public portal until their application is either accepted (transitioning to Student) or rejected.
+*   **Permissions:** Submit application forms, upload KYC documents (National ID, prior transcripts), pay the non-refundable application fee via Telebirr/CBE Birr, and track application status.
+*   **Constraints:** Cannot access any academic content, live classrooms, or library resources. 
+*   **Auto-Archive & Wipe:** If an application is rejected, or if the applicant abandons the process, the account transitions to a `REJECTED` state. Per data minimization principles, the system automatically cryptographically wipes all PII (National ID, phone numbers) exactly **6 months** after the rejection date, retaining only an anonymized statistical record of the rejection reason.
+
+### 8.2 Student (Active Learner)
+**Lifecycle & Scope:** 
+The primary consumer of the 100% online educational experience. This role is activated only after the Registrar formally accepts the applicant and the student pays the initial semester tuition.
+*   **Permissions:** Register for courses (subject to prerequisites and capacity), attend LiveKit sessions, access DRM-protected course materials, submit assignments, take proctored exams, interact with the AI Study Assistant, and view grades/transcripts.
+*   **Financial Hold Logic:** The system continuously checks the Student Wallet. If the balance falls below the required tuition threshold, the system automatically places a `FINANCIAL_HOLD`. This blocks course registration, blocks access to new content, and blocks exam entry. The hold is instantly lifted the millisecond the Finance Vault processes a successful payment webhook.
+*   **Academic Hold Logic:** If a student's CGPA drops below 2.0, they are placed on Academic Probation. The SIS automatically restricts their maximum credit load to 12 credits (down from the standard 19) for the subsequent semester.
+*   **Online-Only Awareness:** The student UI contains no physical campus maps, no physical office hours, and no paper forms. All support is routed through the digital ticketing system or the AI Assistant.
+
+### 8.3 Instructor
+**Lifecycle & Scope:** 
+The digital facilitators of the academic programs. Instructors are strictly gated by regulatory compliance checks before they can interact with any student.
+*   **Credential Gate (Art. 9.2.3):** The system enforces a hard block: an instructor cannot be assigned to any BA-level course unless they possess a verified Master’s degree in the relevant discipline. The System Admin must upload and verify the degree certificate before the instructor account is activated.
+*   **Digital Pedagogy Gate (Art. 9.2.7):** Because delivery is 100% online, Directive 806/2013 mandates that all instructors hold a recognized Digital Pedagogy/Online Teaching certification. The system checks the `digital_pedagogy_cert_expiry` date. If it is expired or missing, the instructor is blocked from creating live sessions, uploading content, or grading.
+*   **Workload Cap Enforcement:** The system tracks the number of credit hours assigned to each instructor per semester. If an assignment would push their workload beyond the institutional maximum (e.g., 15 credit hours per semester), the Academic Head's attempt to assign them is blocked.
+*   **Supervision Ratio (Art. 9.6.8):** For BA programs, the system enforces a strict maximum student-to-instructor ratio of **1:8** for practical/lab components and **1:80** for lecture sections. The course registration engine will hard-block new enrollments into a section if adding one more student would violate this ratio.
+
+### 8.4 Academic Head (Dean / Head of Department)
+**Lifecycle & Scope:** 
+The academic managers responsible for curriculum integrity and departmental oversight.
+*   **Permissions:** Scope is strictly limited to their assigned department (e.g., HoD of MIS cannot see Accounting courses). They can approve syllabi, assign instructors to courses (subject to the gates in 8.3), approve draft grades submitted by instructors, and monitor the Online Delivery Ratio for their department.
+*   **Constraints:** They cannot lock grades (only the Registrar can), nor can they alter financial records or student admissions status.
+
+### 8.5 Registrar
+**Lifecycle & Scope:** 
+The ultimate custodian of academic records and the primary liaison for ETA compliance.
+*   **Grade Lock Authority:** The Registrar is the only role capable of transitioning grades from `HOD_APPROVED` to `REGISTRAR_LOCKED`. Once locked, grades are immutable and flow to the student's permanent transcript.
+*   **Transcript & Degree Issuance:** The Registrar triggers the generation of digitally signed PDF transcripts and degree certificates, complete with QR-code verification links.
+*   **Student Acceptance (Art. 10.4):** The Registrar holds the final authority to transition an Applicant to an Active Student, verifying that all KYC and admission criteria are met.
+*   **Renewal Evidence Custodian:** The Registrar owns the Historical Reconstruction Module and is responsible for reviewing the auto-generated ETA Compliance Bundles before they are submitted to the government.
+
+### 8.6 Finance Officer
+**Lifecycle & Scope:** 
+The managers of the Student Wallet and institutional revenue. They operate strictly within the isolated Finance Vault application.
+*   **Wallet Authority:** Can view wallet balances, generate financial reports, and manually credit wallets in cases of bank transfer discrepancies.
+*   **Payment Verification:** Reviews manual bank receipt uploads from students and verifies them against bank statements.
+*   **Four-Eyes Threshold:** Any manual wallet adjustment, refund, or credit exceeding **5,000 ETB** triggers the Four-Eyes workflow. The Finance Officer initiates the action, but it remains in a `PENDING_APPROVAL` state until the CFO logs in with a separate session and cryptographically approves it.
+*   **Zero Academic Access:** The Finance Officer cannot view student grades, exam content, or attendance logs. They only see student names, IDs, and financial balances.
+
+### 8.7 Librarian
+**Lifecycle & Scope:** 
+Manager of the Digital Library and e-resource compliance.
+*   **Resource Management:** Uploads and categorizes e-books, PDFs, and multimedia resources.
+*   **DRM Enforcement:** Configures the Digital Rights Management rules per resource (e.g., view-only in browser, no download, or limited-copy borrowing with FIFO waitlists).
+*   **Journal Access (Art. 9.5.11):** Manages the institutional credentials for external scientific journals. The system displays available journal access to students based on their specific program requirements.
+
+### 8.8 System Administrator
+**Lifecycle & Scope:** 
+The technical operator of the infrastructure. 
+*   **Permissions:** Full access to server health, logs, backup systems, PM2/Supervisor processes, and user account provisioning (creating accounts, resetting MFA).
+*   **Strict Constraints:** The System Administrator has **ZERO access** to academic or financial data. They cannot view student grades, alter wallet balances, or read KYC National ID documents. Database connections for the SysAdmin tools are restricted to `schema_auth` and infrastructure logs. This ensures the IT staff cannot manipulate academic or financial records.
+
+### 8.9 Compliance Officer
+**Lifecycle & Scope:** 
+The internal auditor and regulatory safeguard. This role is designed to ensure the college never loses its license.
+*   **Read-All Access:** Can view all academic, financial, and operational data to conduct internal audits.
+*   **Account Freeze Authority:** Can instantly freeze any student or staff account suspected of fraud or academic misconduct, halting all their system access.
+*   **Renewal Bundle Signatory:** Reviews the One-Click ETA Compliance Bundle, applies their digital signature, and provisions the time-limited Agency Inspector accounts.
+*   **Constraints:** Cannot alter grades, cannot modify financial balances, and cannot change system code.
+
+### 8.10 Agency Inspector
+**Lifecycle & Scope:** 
+A specialized, temporary role created exclusively for external ETA evaluators during license renewal or accreditation visits (Art. 11.13).
+*   **Provisioning:** Created solely by the Compliance Officer. The account is configured with a strict `start_date` and `expiry_date`. At 11:59 PM on the expiry date, the account is automatically and permanently deleted.
+*   **Permissions:** Strictly **Read-Only**. The inspector is granted access to a dedicated dashboard containing the ETA Compliance Bundle, the hash-chained audit logs, faculty credential registers, and live delivery ratio reports. 
+*   **Constraints:** Cannot modify any data, cannot download raw PII (only aggregated or redacted reports), and cannot access the system outside of their approved time window. All inspector login events and page views are heavily logged.
+
+### 8.11 Disciplinary Committee
+**Lifecycle & Scope:** 
+A specialized role (or group of roles) tasked with reviewing academic integrity violations.
+*   **Scope:** Strictly limited to viewing `Suspicion Reports` generated by the AI Proctoring system (Section 15) and managing academic integrity cases.
+*   **Permissions:** Can view proctoring snapshots, exam logs, and violation videos. They have the authority to change an exam status from `FLAGGED` to `INVALIDATED` or `CLEARED`.
+*   **Constraints:** They cannot view the student's financial records, general grades, or personal PII beyond what is necessary for the disciplinary case.
+
+### 8.12 Permission Matrix (Role × Action Grid)
+
+| Action / Resource | Applicant | Student | Instructor | Academic Head | Registrar | Finance Officer | SysAdmin | Compliance Officer | Inspector |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Submit KYC / Apply** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Register for Courses** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Upload Course Content** | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Conduct Live Class** | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Draft / Submit Grades** | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Approve Grades (HoD)** | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Lock Grades / Transcript**| ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Credit Student Wallet** | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| **Approve >5k ETB Adj.** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌* | ❌ |
+| **View Audit Logs** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| **Generate ETA Bundle** | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ |
+| **Server / Infra Config** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
+
+*\*Note: The CFO (not listed as a daily operational role, but mapped to Root Authority) approves >5k ETB adjustments via the 2-of-3 multi-sig process.*
+
+### 8.13 Data Retention per Role Lifecycle
+
+To comply with the Ethiopian Data Protection Proclamation and ETA audit requirements, data is automatically purged or archived based on the user's lifecycle state. A nightly cron job (`schema_audit` verified) enforces these rules:
+
+| User State / Record Type | Retention Period | Action Upon Expiry |
+| :--- | :--- | :--- |
+| **Rejected Applicant** | 6 months from rejection date. | **Cryptographic Wipe.** PII (Name, ID, Phone) is permanently overwritten with random data. Only anonymized admission stats remain. |
+| **Active Student** | Duration of enrollment. | N/A |
+| **Graduate (Alumni)** | Perpetual. | Academic records (transcripts, degrees) are retained permanently to allow for future verification. PII is retained but heavily encrypted. |
+| **Expelled Student** | 10 years post-expulsion. | After 10 years, academic records are anonymized. |
+| **Financial Records** | 7 years from transaction date. | Archived to cold storage, then cryptographically destroyed per national financial audit laws. |
+| **Audit Logs** | 5 years from event date. | Archived. The hash chain is preserved, but older logs may be moved to offline cold storage. |
+| **Proctoring Snapshots** | 1 Semester (approx. 6 months). | **Permanent Delete.** Once the grade dispute window for the semester closes, all webcam snapshots and AI suspicion images are permanently wiped from MinIO to protect student privacy. |
+| **KYC Documents (National ID)**| 6 months post-rejection OR Perpetual if enrolled. | If rejected, wiped at 6 months. If enrolled, retained securely as long as the student record exists. |

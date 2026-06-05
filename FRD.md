@@ -819,3 +819,255 @@ To comply with the Ethiopian Data Protection Proclamation and ETA audit requirem
 | **Audit Logs** | 5 years from event date. | Archived. The hash chain is preserved, but older logs may be moved to offline cold storage. |
 | **Proctoring Snapshots** | 1 Semester (approx. 6 months). | **Permanent Delete.** Once the grade dispute window for the semester closes, all webcam snapshots and AI suspicion images are permanently wiped from MinIO to protect student privacy. |
 | **KYC Documents (National ID)**| 6 months post-rejection OR Perpetual if enrolled. | If rejected, wiped at 6 months. If enrolled, retained securely as long as the student record exists. |
+
+---
+
+# PART FOUR — FUNCTIONAL MODULES
+
+# Section 9 — Identity & Authentication Service
+
+In a 100% online institution with no physical campus, the Identity and Authentication Service is the absolute perimeter of the system. There are no physical ID cards to check at a door, and no in-person IT desk to reset a forgotten password. Therefore, the digital onboarding, KYC (Know Your Customer), and session management workflows must be exceptionally rigorous, fully automated where possible, and strictly audited to prevent identity fraud and unauthorized access.
+
+### 9.1 Public Registration Portal Security
+
+The entry point for all Applicants is the public-facing Next.js application. Because it is exposed to the open internet, it must be heavily fortified against automated abuse and malware uploads.
+
+*   **Rate Limiting:** Nginx and Redis enforce strict rate limits on the registration and login endpoints. A single IP address is limited to 10 registration attempts and 30 login attempts per hour. Exceeding this triggers a temporary IP ban and alerts the System Administrator.
+*   **File Upload Security (KYC & Documents):** When an applicant uploads their National ID or prior transcripts, the system does not trust the file extension. 
+    1.  **MIME Verification:** The system reads the file's magic numbers to verify the actual content type matches the declared type (e.g., ensuring a `.pdf` is actually a PDF and not an executable renamed to `.pdf`).
+    2.  **ClamAV Integration:** Before the file is moved to the permanent `private/kyc-docs` MinIO bucket, it is passed through a local ClamAV daemon. If any malware, scripts, or malicious payloads are detected, the upload is instantly rejected, deleted, and the IP address is flagged for review.
+
+### 9.2 Digital KYC Workflow (Art. 8.2)
+
+Since there is no physical registration desk, the verification of an applicant's identity is handled entirely through a specialized digital workflow.
+
+*   **Submission:** The applicant uploads a clear scan/photo of their Ethiopian National ID (Kebele ID or Passport) and enters their demographic data.
+*   **Side-by-Side Review Interface:** The Registrar is presented with a specialized UI. On the left is the uploaded National ID image; on the right is the data the applicant typed into the form, alongside a live selfie video/photo captured via the applicant's webcam during submission.
+*   **Decision & Reason Codes:** The Registrar must select either `APPROVE` or `REJECT`. 
+    *   If rejected, the system mandates the selection of a standardized reason code (e.g., "Blurry Image", "Name Mismatch", "Suspected Fraud") and allows for optional notes.
+*   **Audit Trail:** The exact timestamp, the Registrar's user ID, the decision, and the reason code are immediately written to the hash-chained `schema_audit` log.
+
+### 9.3 Student ID Generation & Immutability
+
+Upon KYC approval and formal acceptance by the Registrar, the system automatically generates a unique, immutable Student ID.
+
+*   **Format Standard:** `PC/[DEPT]/[SEQ]/[YEAR]`
+    *   `PC`: Power College.
+    *   `[DEPT]`: 3-letter department code (e.g., `MIS` for Management Information Systems, `ACC` for Accounting & Finance, `MGT` for Management).
+    *   `[SEQ]`: A zero-padded 4-digit sequential number (e.g., `0001` to `9999`).
+    *   `[YEAR]`: The 4-digit year of initial enrollment (e.g., `2026`).
+    *   *Example:* `PC/MIS/0142/2026`
+*   **Database Sequence:** The sequence number is generated via a dedicated PostgreSQL sequence object per department (`seq_mis_student_id`), guaranteeing zero collisions even under high concurrent registration loads.
+*   **Immutability:** Once assigned and written to `schema_sis`, the Student ID is permanently locked. The database schema enforces a `BEFORE UPDATE` trigger that rejects any attempt to modify the `student_id` column. If a student changes their legal name, the name is updated, but the Student ID remains identical for life.
+
+### 9.4 Instructor Credential Verification Gate (Art. 9.2.3)
+
+Directive 806/2013 strictly mandates that instructors teaching BA programs must hold a minimum of a Master's degree in the relevant discipline. The system enforces this via an unbreakable technical gate.
+
+*   **Upload & Verification:** The System Administrator uploads the instructor's degree certificates and transcripts. The Academic Head (Dean/HoD) reviews and digitally signs off on the verification.
+*   **The Hard Block:** The `instructors` table in `schema_auth` contains a boolean column `masters_degree_verified`. 
+*   **Enforcement:** If the Academic Head attempts to assign this instructor to a course section, the Laravel backend checks this flag. If `false`, the API returns a `403 Forbidden` with the message: *"Assignment Blocked: Instructor lacks verified Master's degree per Art. 9.2.3."* There is no override capability, not even by the System Administrator.
+
+### 9.5 Digital Pedagogy Certification Gate (Art. 9.2.7)
+
+Because Power College is a 100% online institution, the ETA requires all instructors to hold a recognized certification in digital pedagogy/online teaching.
+
+*   **Expiration Tracking:** The system stores the `digital_pedagogy_cert_expiry` date for every instructor.
+*   **Automated Hard Block:** A daily cron job checks this date. If the certificate is within 30 days of expiry, the system emails the instructor and the Academic Head. 
+*   **Enforcement:** If the date passes and the certificate is not renewed and re-verified by the Academic Head, the instructor's account is instantly restricted. They can still view their profile, but they are **blocked** from:
+    1.  Creating new LiveKit sessions.
+    2.  Uploading new course content.
+    3.  Accessing the grading interface.
+    *Their existing live classes continue, but no new academic actions can be performed until compliance is restored.*
+
+### 9.6 Centralized SSO & Token Lifecycle
+
+The system utilizes a centralized Authentication Service to issue and manage secure tokens across the Domain-Separated Monolith.
+
+*   **RS256 Asymmetric JWT:** Tokens are signed using an RSA-256 private key held exclusively by the Auth Service. The Academic Core, Finance Vault, and Node.js engines hold only the public key, allowing them to verify tokens locally without network calls to the Auth Service.
+*   **Token Lifetimes:**
+    *   **Access Token:** Strict 15-minute TTL. Used for all API requests.
+    *   **Refresh Token:** 7-day TTL. Used exclusively to request a new Access Token.
+*   **Refresh Token Rotation:** Every time a Refresh Token is used, it is immediately invalidated, and a *new* Refresh Token is issued. If a stolen Refresh Token is used *after* the legitimate user has already used it to get a new token, the system detects the reuse anomaly and instantly revokes *all* active sessions for that user.
+*   **Redis Blacklist with AOF:** When a user logs out, changes their password, or is frozen by the Compliance Officer, their current Access Token's JTI (JWT ID) is added to a Redis blacklist. Redis is configured with **Append Only File (AOF)** persistence, ensuring that if the server crashes, the blacklist is not lost, preventing replay attacks upon reboot.
+
+### 9.7 Device Fingerprinting & Anomaly Detection
+
+To detect account sharing or compromised credentials, the system passively tracks the devices used to access the platform.
+
+*   **Fingerprint Generation:** Upon login, the Next.js frontend generates a hash based on immutable browser characteristics (Canvas fingerprint, WebGL renderer, screen resolution, timezone, and installed fonts) combined with the user's IP subnet.
+*   **New Device Alert:** If a user logs in from a device fingerprint that has never been associated with their account, the system allows the login (assuming credentials and MFA are correct) but immediately triggers an automated email to the user's registered address: *"Security Alert: A new device was used to log into your Power College account from [IP Address/City]. If this was not you, contact the Compliance Officer immediately."*
+*   **Concurrent Session Limits:** As defined in Section 7.6, the system tracks active device fingerprints. If a Student attempts to log in from a 3rd device, the oldest session is forcibly terminated.
+
+### 9.8 IP Whitelisting & Geo-Fencing (High-Privilege Roles)
+
+For roles with access to highly sensitive data (Finance Officer, Registrar, Compliance Officer), password and MFA security may be augmented with network-level restrictions.
+
+*   **Optional IP Whitelisting:** The System Administrator can configure an `allowed_ip_ranges` array for specific roles. 
+*   **Implementation:** If enabled for the Finance Officer role, any login attempt originating from an IP address outside the defined ranges (e.g., the college's administrative office IP block or a specific EthioTelecom business IP range) is rejected with a `403 Forbidden`, even if the password and MFA code are correct.
+*   **Geo-Fencing:** As an additional layer, the system can block login attempts originating from IP addresses geolocated outside of Ethiopia, preventing foreign-based credential stuffing attacks from even reaching the MFA prompt.
+
+---
+
+# PART FOUR — FUNCTIONAL MODULES (Continued)
+
+## Section 10 — Student Information System (SIS)
+
+The Student Information System (SIS) is the academic brain of the POC-AMS. In a 100% online environment, the SIS replaces the physical registrar's office, the physical bursar's clearance desk, and the paper-based transcript vault. Every academic action, from the moment a student registers for their first course to the issuance of their digital degree, is governed by strict state machines, automated business rules, and immutable audit trails.
+
+### 10.1 Admissions & Enrollment Workflow (Art. 8.2, 10.4)
+
+The transition from a public Applicant to an Active Student is a strictly gated, multi-step state machine.
+
+*   **State 1: Application Submitted:** Applicant completes the public form and pays the non-refundable application fee via Telebirr/CBE Birr.
+*   **State 2: KYC Verified:** The Registrar completes the side-by-side National ID verification (Section 9.2).
+*   **State 3: Academic Review:** The Registrar or Admissions Officer reviews the uploaded prior educational credentials (e.g., Ethiopian University Entrance Exam results, high school transcripts). 
+*   **State 4: Accepted / Rejected:** The Registrar issues a formal decision. If rejected, the 6-month auto-wipe clock starts (Section 8.1).
+*   **State 5: Enrolled (Active Student):** The `Accepted` state does not grant system access. The student only transitions to `Enrolled` when the Finance Vault registers the payment of the initial semester tuition or deposit. This triggers the provisioning of their `schema_sis` student profile and the generation of their immutable Student ID (Section 9.3).
+
+### 10.2 Course Registration Engine
+
+Course registration in a 100% online system is highly competitive and prone to massive concurrency spikes on opening day. The engine is built to handle this while strictly enforcing ETA regulatory limits.
+
+*   **Concurrency Handling:** The registration endpoint does not write directly to the database. It pushes the request into a **Redis FIFO Queue** managed by Laravel Horizon. Workers process the queue sequentially, preventing race conditions and double-bookings.
+*   **Credit Load Limits:** 
+    *   Standard maximum: 19 credit hours per semester.
+    *   Probation maximum: 12 credit hours per semester (automatically enforced if the student's academic standing is `PROBATION`).
+*   **Section Capacity Cap (Art. 9.6.1):** The system enforces a hard limit of **80 students per course section**. If a section has 79 seats filled, and 10 students attempt to register simultaneously via the queue, exactly 1 student is enrolled, and the remaining 9 are automatically placed on the FIFO waitlist.
+*   **Instructor Supervision Ratio (Art. 9.6.8):** For BA programs, the system enforces a maximum student-to-instructor ratio of **1:8** for practical/lab components. The registration engine will block enrollment if adding a student violates this ratio.
+*   **Prerequisite Chain Enforcement:** The system checks the `prerequisite_chain` JSONB column of the target course. If the student has not achieved a passing grade (`>= 'D'`) in the prerequisite course, registration is blocked.
+*   **Delivery Mode Hardcode:** Every course section is hardcoded to `delivery_mode = 'ONLINE'`. There is no UI dropdown or database option to select "In-Person" or "Blended".
+*   **Waitlist Notifications:** If a seat opens up in a full section, the system automatically enrolls the first student on the FIFO waitlist and triggers an **SMS notification** via EthioTelecom: *"Power College: A seat has opened in [Course Code]. You have been auto-enrolled. Please check your portal."*
+
+### 10.3 Grade Lifecycle & Immutability
+
+Grades are highly sensitive legal records. The system enforces a strict, unalterable lifecycle.
+
+*   **State Machine:** `DRAFT` (Instructor) → `SUBMITTED` (Instructor) → `HOD_APPROVED` (Academic Head) → `REGISTRAR_LOCKED` (Registrar).
+*   **Hash-Chained Transitions:** Every time a grade moves from one state to another, the system generates a payload containing the `course_id`, `student_id`, `old_grade`, `new_grade`, `timestamp`, and `actor_id`. This payload is hashed and appended to `schema_audit`.
+*   **Locking:** Once a grade reaches `REGISTRAR_LOCKED`, it is mathematically sealed. It immediately factors into the student's cumulative GPA and becomes visible on their official transcript.
+
+### 10.4 Grade Change Workflow (Four-Eyes)
+
+If a mathematical error or systemic flaw is discovered after grades are locked, they cannot simply be "edited." A formal Grade Change Workflow is required.
+
+*   **Initiation (Maker):** The Head of Department (HoD) initiates a Grade Change Request. They must select a mandatory, standardized Reason Code (e.g., "Calculation Error", "Missing Assignment Found", "Appeal Committee Ruling") and upload supporting evidence (e.g., the original exam paper scan).
+*   **Approval (Checker):** The request routes to the Registrar. The Registrar reviews the evidence. If approved, the system executes the change.
+*   **Immutability & Versioning:** The system **never overwrites** the original grade. Instead, it creates a new version of the grade record (v1.0 → v1.1). The original `REGISTRAR_LOCKED` grade remains in the database history forever. The new grade takes effect, and both the initiation and approval are permanently etched into the hash-chained audit log.
+
+### 10.5 GPA Calculation Engine
+
+*   **Standard:** The system calculates GPA based on the standard 4.0 scale used in Ethiopian higher education.
+*   **Automation:** GPA is recalculated in real-time in a materialized view whenever a new grade is locked or changed. 
+*   **Edge Cases:** The engine handles course repeats (replacing the failed grade in the cumulative calculation per institutional policy) and transfer credits (marked as `TR`, contributing to total credits but excluded from the GPA math).
+
+### 10.6 Academic Standing Engine
+
+The system automatically evaluates student performance at the end of every semester to determine academic standing.
+
+*   **Good Standing:** Cumulative GPA (CGPA) ≥ 2.0.
+*   **Academic Probation:** CGPA drops below 2.0. 
+    *   *Automated Action:* The system instantly updates the student's `max_credits_allowed` attribute to 12 for the next registration cycle. An automated SMS and Email are sent to the student and their assigned academic advisor.
+*   **Academic Suspension:** CGPA drops below 1.5, OR the student remains on Probation for three consecutive semesters.
+    *   *Automated Action:* The student's account is placed in `SUSPENDED` status. They are blocked from registering for courses, accessing the LMS, or taking exams. Reinstatement requires a manual, four-eyes approved petition process reviewed by the Academic Dean.
+
+### 10.7 Transcript Generation & Verification
+
+Since there is no physical registrar window to request paper transcripts, the system provides on-demand, legally binding digital transcripts.
+
+*   **On-Demand PDF:** Students can request a transcript via the portal. The system generates a high-fidelity PDF using a headless browser engine (e.g., Puppeteer/Snappy) to ensure exact typographic control.
+*   **Digital Signature:** The PDF is cryptographically signed using the institution's private key. 
+*   **QR Code Verification:** Every transcript contains a unique, scannable QR code. When scanned by a third party (e.g., an employer or foreign university), it redirects to a secure, public-facing Power College verification page (`verify.powercollege.edu.et/[UUID]`) that displays the exact same transcript data and confirms its cryptographic validity.
+
+### 10.8 Graduation Audit & Sequential Clearance
+
+Before a student can graduate, the system runs an automated, comprehensive audit.
+
+*   **Automated Checks:**
+    1.  Total credit hours meet the program requirement (e.g., 160+ credits for BA).
+    2.  CGPA is ≥ 2.0.
+    3.  No 'F' grades remain in core/major courses.
+    4.  **Online Delivery Ratio:** The system verifies the student's attendance and engagement logs to prove 100% online participation (automatically satisfied and logged per Art. 8.3.10).
+*   **Sequential Digital Clearance Chain:** Because there is no physical campus, "getting cleared" by the library and finance offices is entirely digital.
+    1.  **Library Clearance:** The system checks the Digital Library module. It verifies the student has no overdue DRM-protected offline downloads, no unresolved plagiarism flags, and no outstanding digital fines. If clear, it digitally signs off.
+    2.  **Finance Clearance:** The system checks the Finance Vault. The student's wallet balance must be ≥ 0.00 ETB. If there is an outstanding balance, the clearance is blocked.
+    3.  **Registrar Clearance:** Once Library and Finance return `CLEARED` status, the Registrar's dashboard unlocks the "Issue Degree" button.
+
+### 10.9 Digital Degree Certificate Issuance
+
+Upon final Registrar clearance, the system generates the Digital Degree Certificate.
+
+*   **Format:** A high-resolution, visually distinct PDF designed to mimic a formal parchment certificate.
+*   **Security:** Embedded with a cryptographic hash of the student's final academic record. 
+*   **Issuance:** The certificate is delivered directly to the student's secure document vault in the portal. It is instantly verifiable via the same QR code mechanism used for transcripts.
+
+### 10.10 Accreditation Status Flag (Contingency)
+
+In the event that the ETA suspends or revokes Power College's accreditation for a specific program while students are currently enrolled:
+
+*   **System Flag:** The Compliance Officer can toggle the `accreditation_status` of a specific program to `SUSPENDED`.
+*   **Impact:** 
+    1.  The public admissions portal immediately hides the program and blocks new applications.
+    2.  Current students enrolled in that program receive an automated, legally mandated notification explaining their rights (e.g., the right to complete their degree under the cohort rules active when they entered, or the right to transfer).
+    3.  The system flags these students' profiles, ensuring that any future ETA compliance reports accurately reflect the number of students affected by the accreditation change, protecting the institution from claims of misrepresentation.
+ 
+
+---
+
+# PART FOUR — FUNCTIONAL MODULES (Continued)
+
+# Section 11 — Online Delivery Compliance Module
+
+In a 100% online institution, the Online Delivery Compliance Module is not merely a tracking tool; it is the primary regulatory survival engine. Because Power College has no physical classrooms to fall back on, this module must mathematically guarantee, continuously monitor, and cryptographically prove to the Ethiopian Education and Training Authority (ETA) that every statutory mandate regarding digital contact hours and delivery ratios is being met. 
+
+### 11.1 Delivery Ratio Tracker (Art. 8.3.10)
+
+Directive 806/2013 mandates that online programs must deliver a minimum of 60% of their contact hours via digital means. Because Power College is architecturally locked to 100% online delivery, this module is designed to prove a continuous 100% compliance rate.
+
+*   **The Formula:** The system continuously calculates the ratio per course section: `Total_Digital_Hours_Delivered / Total_Hours_Scheduled`.
+*   **The 100% Target:** In this system, the target ratio is perpetually `1.0` (100%). There are no physical hours in the denominator.
+*   **Real-Time Dashboards:** 
+    *   **Instructor View:** Shows their personal delivery ratio across all assigned sections.
+    *   **HoD View:** Aggregated departmental delivery ratios.
+    *   **Registrar & Compliance Officer View:** Institution-wide macro dashboard showing real-time compliance across all three BA programs.
+*   **Anomaly Alerting (The 90% Threshold):** In a 100% online system, a delivery ratio dropping below 90% does not mean students are attending physical classes; it indicates a catastrophic failure. It means a LiveKit server outage, an instructor failed to show up for a scheduled live stream, or a course was improperly cancelled. If the rolling 7-day average for any section drops below 90%, the system instantly triggers a **P1 Critical Alert** via SMS and Email to the HoD, Registrar, and Compliance Officer, demanding immediate remediation (e.g., scheduling an emergency make-up live session).
+
+### 11.2 Live Contact Hour Formula Enforcer (Art. 9.5.8)
+
+The ETA strictly regulates the minimum amount of *synchronous, live* instruction required for online programs to ensure quality. The system enforces these formulas at both the scheduling stage and the execution stage.
+
+*   **Statutory Formulas Hardcoded:**
+    *   **1-Credit Course:** Minimum 2 live, synchronous hours per week.
+    *   **3-Credit Course:** Minimum 3 live, synchronous hours per week.
+    *   *(Note: The system dynamically scales this formula for any other credit weights based on the current ETA regulatory matrix).*
+*   **Scheduling Gate (Pre-Semester):** When the Academic Head attempts to publish the semester timetable in the LMS, the system calculates the total scheduled LiveKit minutes for every section. If a 3-credit course only has 150 minutes of live sessions scheduled for the week, the system **blocks publication** with the error: *"Timetable Rejected: Section violates Art. 9.5.8 minimum live contact hour formula."*
+*   **Execution Tracking (Intra-Semester):** The system integrates directly with the Live Classroom Service (Section 14). It tracks the actual duration of live sessions, filtered by the automated attendance engine (only counting time where students were actively connected). 
+*   **Shortfall Pacing Alerts:** The system divides the required weekly hours by the working days of the week. If, by Wednesday at 5:00 PM EAT, a section has delivered less than 50% of its required live hours for that week, an automated alert is sent to the Instructor and HoD: *"Compliance Warning: Section [X] is tracking below the statutory live contact hour pace. Schedule a make-up session immediately."*
+
+### 11.3 Semester Delivery Compliance Report
+
+At the exact moment the semester closes (automated via the Academic Calendar), the system locks all delivery data and generates the official compliance report.
+
+*   **Auto-Generation:** The system compiles a comprehensive report detailing every course, section, instructor, scheduled hours, and verifiably delivered live hours.
+*   **Digital Signature:** The Compliance Officer reviews the report in the dashboard and applies their cryptographic digital signature (via their hardware MFA key). 
+*   **Immutable Storage:** The signed PDF and the underlying raw JSON data are hashed and stored in the `private/audit-exports` MinIO bucket. This report becomes a permanent, unalterable component of the institution's ETA Compliance Bundle.
+
+### 11.4 Academic Calendar Management & Agency Export
+
+The system manages the legal timeline of the academic year.
+
+*   **Published vs. Actual:** The Registrar defines the official Academic Calendar (Start Date, Instructional Weeks, Exam Weeks, Holidays). The system continuously compares the `Published_Calendar` against the `Actual_System_Uptime_and_Delivery` logs.
+*   **Art. 9.9.4 Agency Submission Export:** The ETA requires institutions to submit their executed academic calendar. The system provides a one-click export feature that generates a standardized CSV and PDF report. This report proves exactly how many instructional days were planned, how many were executed, and provides the digital audit trail for any deviations (e.g., a 2-day system outage that was legally compensated with a weekend make-up class).
+
+### 11.5 Historical Compliance Reconstruction Interface
+
+**Context:** To renew its license under Art. 10, Power College must provide evidence of compliance for the *entire past 3-year license period*. Because the POC-AMS is a new system, it only possesses data from its go-live date forward. This creates a critical regulatory gap.
+
+**The Solution:** The Historical Reconstruction Module bridges this gap, ensuring the ETA renewal application is not rejected due to a lack of historical data.
+
+*   **Admin-Only Access:** This interface is strictly restricted to the Registrar and the Compliance Officer. System Administrators cannot access it, ensuring academic data integrity.
+*   **Data Ingestion:** The interface allows the Registrar to manually input past semester records or perform bulk CSV uploads of historical data extracted from the college's legacy systems or physical paper records.
+    *   *Required Fields:* Program, Course Code, Section, Instructor Name, Semester/Year, Scheduled Hours, Delivered Hours, Start Date, End Date.
+*   **Cryptographic Parity:** Once historical data is uploaded, the system does not treat it as "second-class" data. The system generates a synthetic audit log entry for the upload, flags it with `source: historical_reconstruction`, and hashes it into the audit chain. 
+*   **Unified Bundle Formatting:** The historical data is formatted into the exact same digitally signed compliance bundle structure as the live data. When the Compliance Officer generates the 3-Year Renewal Evidence Package, the ETA inspector sees a seamless, mathematically verifiable, continuous 3-year trail of compliance, completely indistinguishable in format from the live system data.
+

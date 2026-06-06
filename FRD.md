@@ -1071,3 +1071,198 @@ The system manages the legal timeline of the academic year.
 *   **Cryptographic Parity:** Once historical data is uploaded, the system does not treat it as "second-class" data. The system generates a synthetic audit log entry for the upload, flags it with `source: historical_reconstruction`, and hashes it into the audit chain. 
 *   **Unified Bundle Formatting:** The historical data is formatted into the exact same digitally signed compliance bundle structure as the live data. When the Compliance Officer generates the 3-Year Renewal Evidence Package, the ETA inspector sees a seamless, mathematically verifiable, continuous 3-year trail of compliance, completely indistinguishable in format from the live system data.
 
+---
+
+# PART FOUR — FUNCTIONAL MODULES (Continued)
+
+# Section 12 — Finance & Wallet Service
+
+In a 100% online institution, there are no physical cashiers, no paper receipt books, and no in-person bursar windows. The Finance & Wallet Service (housed within the strictly isolated Finance Vault application) is the sole engine for institutional revenue collection, student billing, and financial compliance. It operates under the strict mandate of Article 9.7 (Financial Management) and Article 8.2.12 (E-Payment Integration) of Directive 806/2013, ensuring absolute transparency, zero data leakage to the academic domains, and unbreakable auditability.
+
+### 12.1 Double-Entry Ledger & Student Wallet Architecture
+
+The core of the Finance Vault is an immutable, append-only double-entry accounting system. 
+
+*   **No In-Place Balance Updates:** The system never simply updates a `balance` column in a student's profile. Every financial action creates two or more ledger entries (a DEBIT and a CREDIT) in the `schema_finance.ledger_entries` table.
+*   **Materialized Views:** A student's current wallet balance is calculated on-the-fly via a highly optimized PostgreSQL Materialized View that sums all CREDIT and DEBIT entries for that `wallet_id`. This view is refreshed asynchronously via Redis Pub/Sub events immediately after any transaction commits.
+*   **Immutability:** The `ledger_entries` table is configured with database-level triggers that block any `UPDATE` or `DELETE` operations. If a transaction is erroneous, it cannot be deleted; it must be corrected by creating a new, reversing journal entry. This guarantees a permanent, mathematically verifiable trail for ETA financial auditors.
+
+### 12.2 Automated Tuition Formula & Invoicing
+
+At the start of every semester, the SIS triggers the Finance Vault to generate invoices for all active students based on their registered course load.
+
+*   **Statutory Formula:** The system calculates tuition dynamically: `(Total_Registered_Credits × Credit_Rate) + Base_Semester_Fee + Technology_Fee`.
+*   **Digital Invoice Generation:** A digital invoice is instantly generated and deposited into the student's portal. 
+*   **Due Dates & Penalties:** The system enforces institutional payment deadlines. If the balance remains unpaid past the grace period, automated late fees (calculated as a fixed percentage per the institutional policy) are applied via scheduled Laravel Horizon cron jobs.
+
+### 12.3 E-Payment Integration & Webhook Idempotency (Art. 8.2.12)
+
+Directive 806/2013 mandates the integration of national digital payment channels. The system integrates directly with **Telebirr** and **CBE Birr** APIs.
+
+*   **API Orchestration:** When a student initiates a payment in the UI, the Finance Vault generates a unique `reference_id`, calls the respective payment gateway API to trigger a USSD push or prompt to the student's mobile wallet, and awaits the asynchronous webhook callback.
+*   **Webhook Idempotency (The Anti-Double-Credit Shield):** Payment gateways frequently retry webhooks if they do not receive an immediate `200 OK` response. To prevent a single 5,000 ETB payment from being credited to the student's wallet three times:
+    1.  The webhook endpoint extracts the gateway's unique `transaction_id`.
+    2.  It queries Redis for this `transaction_id`.
+    3.  If the key exists, the system immediately returns `200 OK` to the gateway (stopping their retries) but performs **zero database operations**.
+    4.  If the key does not exist, the system writes the `transaction_id` to Redis with a strict **24-hour TTL**, processes the ledger entry, and then returns `200 OK`.
+
+### 12.4 Manual Bank Receipt Fallback (Maker-Checker)
+
+For students who must pay via direct bank deposit at a physical branch (or in cases where the API fails), the system provides a digital manual verification workflow.
+
+*   **Submission:** The student uploads a clear photo/scan of the stamped bank deposit slip via the portal. The file is passed through ClamAV and stored in the `private/financial-records` MinIO bucket.
+*   **Verification (Maker):** A Finance Officer reviews the slip against the bank's digital statement API (or manual batch file). If valid, they click "Verify".
+*   **Constraint:** The Finance Officer cannot unilaterally credit the wallet for manual uploads exceeding 5,000 ETB. This action triggers the Four-Eyes workflow (Section 12.7).
+
+### 12.5 Financial Holds & Automated Enforcement
+
+Because the institution is 100% online, financial leverage is the primary mechanism for ensuring tuition collection. The Finance Vault continuously broadcasts the student's financial status to the Academic Core via Redis Pub/Sub.
+
+*   **Registration Block:** If `wallet_balance < required_tuition_threshold`, the SIS blocks the student from adding or dropping courses.
+*   **Content Access Block:** The LMS dynamically checks the financial hold flag. If active, the student can view the course syllabus but is blocked from streaming pre-recorded HLS videos or downloading DRM-protected materials.
+*   **Exam Access Block:** The Proctoring Service checks the financial hold flag 15 minutes before an exam starts. If active, the student's exam token is revoked, and they are locked out of the exam environment.
+*   **Instant Lift:** The millisecond a successful payment webhook is processed, the hold flags are cleared in Redis, and all system access is instantly restored without human intervention.
+
+### 12.6 Circuit Breakers, Fraud Detection & Rate Limiting
+
+The Finance Vault is heavily fortified against both accidental system loops and malicious exploitation.
+
+*   **Velocity Checks (Rapid Fire):** If a single student wallet receives more than **3 successful credit transactions within a 60-second window**, an automated circuit breaker trips. The wallet is instantly frozen, and a P1 alert is sent to the Finance Officer to investigate a potential payment gateway loop or fraud attempt.
+*   **Macro Volume Spike:** If the total volume of transactions processed by the Finance Vault exceeds **300% of the historical hourly average**, a global circuit breaker trips. All non-essential background financial processing is paused, and the CFO is alerted via SMS to investigate potential systemic abuse or a DDoS attack on the payment endpoints.
+
+### 12.7 Four-Eyes Approval for High-Value Adjustments
+
+To prevent internal embezzlement or unauthorized tuition waivers, the system enforces the Maker-Checker principle for significant financial movements.
+
+*   **Threshold:** Any manual wallet credit, debit, refund, or tuition adjustment exceeding **5,000 ETB** requires dual authorization.
+*   **Workflow:** The initiating Finance Officer (Maker) submits the adjustment with a mandatory reason code and supporting evidence. The transaction enters a `PENDING_APPROVAL` state.
+*   **Cryptographic Approval:** The CFO or Senior Finance Officer (Checker) must log in from a *different session/IP*, review the evidence, and approve it using their hardware MFA key. The system generates an HMAC-SHA256 signature combining the Maker's ID, Checker's ID, and the transaction payload, ensuring the approval cannot be forged or replayed.
+
+### 12.8 Nightly Reconciliation & Variance Alerting
+
+The system must guarantee that the internal double-entry ledger perfectly matches the actual funds held in the institution's bank accounts and mobile money float.
+
+*   **Automated Reconciliation:** Every night at 1:00 AM EAT, a Laravel Horizon job fetches the daily settlement reports from the Telebirr and CBE Birr merchant APIs.
+*   **Variance Calculation:** The job sums all `CREDIT` entries in the ledger for the day and compares them against the net deposits reported by the payment gateways.
+*   **Zero-Tolerance Alerting:** If the variance exceeds **0.01 ETB** (accounting for minor gateway rounding differences), the reconciliation job fails. An immediate, high-priority SMS and Email alert is sent to the CFO and the Compliance Officer, detailing the exact discrepancy, triggering a mandatory manual audit before the next business day begins.
+
+### 12.9 Refund Policy & Add/Drop Window Enforcement (Art. 9.7.4)
+
+The system strictly enforces institutional and regulatory refund policies without allowing manual override.
+
+*   **Add/Drop Window Logic:** Refunds are only mathematically possible during the first 14 days of the semester (the Add/Drop window). 
+*   **Wallet Credit Only:** The system **never** initiates a reverse transfer to a student's bank account or mobile money wallet (no cash refunds via the system). All approved refunds are issued exclusively as a `CREDIT` to the student's internal Power College Wallet, which can be used for future semester tuition.
+*   **Post-Window Hard Block:** If the academic calendar date exceeds the Add/Drop window, the "Request Refund" button disappears from the UI, and the API endpoint returns a `403 Forbidden` citing the expired regulatory window.
+
+### 12.10 Payment Retry Logic & Dead Letter Queue (DLQ)
+
+When the Finance Vault needs to initiate an outbound API call (e.g., querying a bank API for manual receipt verification, or pushing a refund notification), it must handle network failures gracefully.
+
+*   **Exponential Backoff:** Failed outbound API calls are pushed to a Laravel Horizon queue with an exponential backoff strategy: Retry at 1 minute, then 5 minutes, then 1 hour.
+*   **Dead Letter Queue (DLQ):** If the call fails after 3 attempts, it is moved to the DLQ. 
+*   **Manual Resolution:** The DLQ is monitored via a dedicated dashboard for the Finance Officer. Items in the DLQ halt the related student workflow (e.g., a manual receipt remains "Unverified") until the officer manually inspects the error (e.g., "Bank API Timeout") and triggers a retry or marks it as a system failure.
+
+### 12.11 Finance Reporting Categories (Art. 9.7)
+
+Directive 806/2013 requires institutions to categorize and report their financial utilization. The Finance Vault enforces this at the point of transaction entry.
+
+*   **Mandatory Tagging:** Every ledger entry must be tagged with a standardized financial category code:
+    *   `TUITION_REVENUE` (Student tuition payments)
+    *   `STUDENT_SUPPORT` (Scholarships, refunds, welfare allocations)
+    *   `ADMIN_COSTS` (System operational costs, server leases, software licenses)
+*   **One-Click ETA Financial Export:** The Compliance Officer can generate a categorized financial summary report at any time. This report mathematically proves to the ETA how tuition revenue is being allocated, satisfying the financial transparency requirements of the license renewal process.
+
+### 12.12 Cross-Domain Compensation Saga
+
+Because the Finance Vault and Academic Core are isolated, a failure in one must not leave the system in an inconsistent state.
+
+*   **The Scenario:** The Finance Vault successfully processes a Telebirr payment and publishes the `finance.payment.success` event to Redis. The Academic Core consumes this event to lift the student's financial hold and unlock their registered courses. However, the Academic Core's database crashes *after* lifting the hold but *before* unlocking the courses.
+*   **The Saga Rollback:** The Academic Core detects the partial failure and publishes a `sis.course_unlock.failed` event back to Redis.
+*   **Automated Reversal:** The Finance Vault consumes this failure event. To maintain absolute ledger integrity, it automatically generates a reversing journal entry (refunding the student's wallet), publishes a `finance.refund.processed` event, and triggers an SMS to the student: *"System Error: Your payment could not be fully processed due to a technical fault. Your wallet has been refunded. Please retry your payment."*
+*   **Guarantee:** The Transactional Outbox pattern ensures that no failure is ever silent. The system will always either achieve full consistency or automatically roll back to the exact state prior to the transaction.
+---
+# PART FOUR — FUNCTIONAL MODULES (Continued)
+
+# Section 13 — Curriculum & Content Management Service
+
+In a 100% online institution, the Curriculum and Content Management Service replaces the physical textbook, the printed syllabus, and the lecture hall. Every piece of academic material, from the course catalog to the microsecond of video lecture, must be digitally managed, version-controlled, and strictly protected by Digital Rights Management (DRM). This module ensures compliance with Article 9.3 (Curriculum) and Article 9.4 (Educational Materials) of Directive 806/2013, while optimizing for the bandwidth realities of students in West Gojjam.
+
+### 13.1 Academic Hierarchy & Course Schema
+
+The system enforces a rigid, unalterable academic hierarchy that dictates how content is structured and delivered.
+
+*   **The Hierarchy:** `Institution` → `Program` (e.g., BA MIS) → `Semester` (e.g., Year 2, Sem 1) → `Course` (e.g., Database Systems) → `Section` (e.g., Section A).
+*   **Hardcoded Delivery Mode:** The `courses` and `sections` database schemas contain a `delivery_mode` column. This column is strictly constrained at the database level to accept only the value `'ONLINE'`. There is no UI dropdown, no API parameter, and no administrative override to change this to 'BLENDED' or 'IN-PERSON'.
+*   **Required Course Fields:** Every course record must contain:
+    *   Unique Course Code (e.g., `MIS2011`) and Name.
+    *   Credit Hours (dictates the live contact hour formula in Section 11).
+    *   Prerequisite Chain (JSONB array of required prior course codes).
+    *   Required Live Hours per Week (calculated automatically based on credit hours per Art. 9.5.8).
+    *   Assigned Instructor(s).
+
+### 13.2 Instructor Assignment & Course Activation Gates
+
+Before a course can be published to students and before an instructor can begin uploading content, the system enforces a series of unbreakable technical gates.
+
+*   **The Triple-Gate Activation Check:** When the Academic Head attempts to change a course section's status from `DRAFT` to `PUBLISHED`, the system sequentially checks three conditions:
+    1.  **Credential Gate:** Is the assigned instructor's `masters_degree_verified` flag set to `true`? (Art. 9.2.3).
+    2.  **Pedagogy Gate:** Is the instructor's `digital_pedagogy_cert_expiry` date valid and in the future? (Art. 9.2.7).
+    3.  **Workload Gate:** Does assigning this section push the instructor's total credit load beyond the institutional maximum?
+*   **Hard Block:** If *any* of these three checks fail, the system returns a `403 Forbidden` error, explicitly citing the failed gate, and blocks the course activation. The course remains invisible to students until all gates pass.
+
+### 13.3 Pre-Recorded Video Engine & Adaptive Streaming
+
+Because students are accessing the 100% online platform from varying network conditions in Finote Selam, raw video uploads are unacceptable. The system utilizes a robust, localized media pipeline.
+
+*   **FFmpeg Transcoding Pipeline:** When an instructor uploads a raw video file (e.g., an MP4 recorded via Zoom or OBS), it is placed in a Laravel Horizon queue. A background worker utilizes FFmpeg to transcode the video into **HLS (HTTP Live Streaming)** format.
+*   **Adaptive Bitrate (ABR) Ladders:** FFmpeg generates three distinct quality tiers for every video:
+    *   `1080p` (High bandwidth / Fiber connections)
+    *   `720p` (Standard broadband)
+    *   `360p` (Low bandwidth / 3G mobile connections)
+    *   *System Implication:* The Next.js video player utilizes the Network Information API. If it detects a student's connection dropping, it seamlessly switches to the 360p stream, preventing buffering and ensuring the student can continue accumulating the required "time-on-task" for attendance compliance.
+*   **Dynamic Watermarking (DRM):** 
+    *   **Phase 1 (CSS Overlay):** The video player injects a semi-transparent, randomized CSS overlay containing the viewing student's ID and the current timestamp. This deters casual screen recording.
+    *   **Phase 2 (Frame-Level Burn-in):** For highly sensitive exam-review videos, FFmpeg physically burns the student's ID into the video pixels during the transcoding process *after* the student requests access, creating a unique, un-removable forensic watermark.
+*   **Seek Lock & Completion Tracking (Art. 9.3.3):** For videos marked as `required_for_completion`, the video player disables the scrubbing/seek bar. The student must watch the video linearly. The system tracks the `watch_duration` vs `video_duration`. A video is only marked "Complete" when the student has accumulated at least **90% of the total runtime** in active viewing time.
+
+### 13.4 Content Version Control & Audit Trail
+
+Academic curricula must be stable, but they also need to evolve. The system manages this via strict versioning.
+
+*   **Syllabus & Content Versioning:** If an instructor modifies a course syllabus, updates a reading list, or replaces a lecture video, the system does not overwrite the old data. It creates a new version (e.g., `v1.0` → `v1.1`).
+*   **Mandatory Reason Field:** The UI forces the instructor to select a reason for the change (e.g., "Correction of Typo", "Updated Regulatory Requirement", "Guest Lecture Addition").
+*   **Immutability:** Previous versions are never deleted. They are archived in `schema_lms` with a `superseded_at` timestamp. If a student disputes a grade based on the syllabus, the Registrar can pull the exact version of the syllabus that was active on the day the assignment was issued.
+
+### 13.5 Copyright Declaration & IP Workflow (Art. 9.4.4)
+
+To protect the institution from intellectual property disputes and to comply with ETA mandates regarding educational materials:
+
+*   **Mandatory IP Acknowledgment:** Before an instructor can publish any uploaded content (PDFs, videos, slides), they are presented with a digital Copyright Declaration form.
+*   **Click-Wrap Agreement:** The instructor must check a box stating: *"I declare that I am the original creator of this material, or I have secured the necessary legal permissions to use it for educational purposes at Power College. I understand that this material becomes the intellectual property of Power College for the duration of my employment."*
+*   **Audit Logging:** This acceptance, complete with a timestamp and IP address, is logged in `schema_audit`. The content cannot be published to students until this flag is set to `true`.
+
+### 13.6 Offline Download Mode & Cryptographic Licensing (Art. 9.4)
+
+Recognizing that internet connectivity in West Gojjam can be intermittent, the system allows students to download specific course materials (PDFs, pre-recorded videos) for offline viewing, but strictly controls this via cryptographic licensing.
+
+*   **AES-256 Encryption:** When a student clicks "Download for Offline", the system does not send the raw file. It encrypts the file using AES-256, binding the decryption key to the student's unique device fingerprint (generated via browser hardware APIs).
+*   **Heartbeat Revalidation:** The encrypted package contains a localized license file. The offline media player requires an internet "heartbeat" every 7 days to revalidate the license. 
+*   **Clock Tampering Prevention:** The license validation checks the system time against an NTP (Network Time Protocol) server upon reconnection. If the system detects that the student has rolled back their local device clock to extend the offline license period, the decryption keys are instantly revoked, and the downloaded files become permanently unreadable.
+*   **Auto-Revocation:** If a student graduates, is expelled, or drops the course, the system revokes their license on the server. The next time their device attempts a heartbeat, the files are cryptographically bricked.
+
+### 13.7 Plagiarism Detection Engine
+
+To maintain academic integrity in a 100% online environment where physical proctoring of essays is impossible:
+
+*   **Internal Hash Comparison:** Every time a student submits a text-based assignment, the system generates a SHA-256 hash of the text. It compares this hash against a local database of all previous submissions from all students across all semesters. If a >80% match is found with another student's work, it flags the submission for the instructor.
+*   **External API Hook (Turnitin) (Art. 9.4.4):** For major research papers, capstone projects, and theses, the system integrates with the Turnitin API.
+    *   **PII Stripping:** Before sending the document to Turnitin, a middleware script strips all metadata, student names, and institutional identifiers, sending only the raw text and a randomized hash.
+    *   **Result Mapping:** Turnitin returns a similarity percentage and a source report mapped to the hash. The system maps this back to the student's record. The external provider never sees the student's identity.
+
+### 13.8 Content Production Tracking Dashboard
+
+Building a 100% online college requires massive upfront content creation. The System Administrator and Academic Dean need visibility into this production pipeline.
+
+*   **Production Status Tracking:** For every course, the system tracks the status of its core modules: `NOT_STARTED`, `IN_PRODUCTION`, `READY_FOR_REVIEW`, `PUBLISHED`.
+*   **Hourage Metrics:** The dashboard calculates the `Total_Required_Hours` (based on the credit hour formula) versus the `Total_Recorded_Hours` of video content currently uploaded.
+*   **Visual Bridge:** This dashboard bridges the gap between the *system build track* and the *content production track*. If the system is ready to launch, but the dashboard shows that the BA Accounting program only has 40% of its required video hours recorded, the Academic Dean knows immediately that the program launch must be delayed, regardless of software readiness.

@@ -11,7 +11,6 @@ const sessions = [
 export default function LivePage() {
   return (
     <AppShell
-      activeHref="/live"
       classification={pageLabels.live}
       title="Live Classroom"
       subtitle="LiveKit sessions, attendance, recording state, and delivery pacing."

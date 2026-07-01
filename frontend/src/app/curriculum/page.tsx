@@ -11,7 +11,6 @@ const production = [
 export default function CurriculumPage() {
   return (
     <AppShell
-      activeHref="/curriculum"
       classification={pageLabels.curriculum}
       title="Curriculum and Content"
       subtitle="Course hierarchy, syllabus versions, media processing, DRM, and content production readiness."

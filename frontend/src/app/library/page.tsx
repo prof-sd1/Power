@@ -5,7 +5,6 @@ import { Bot, Library, Search, KeyRound } from "lucide-react";
 export default function LibraryPage() {
   return (
     <AppShell
-      activeHref="/library"
       classification={pageLabels.library}
       title="AI Study Assistant and Digital Library"
       subtitle="Local RAG boundary, search index, and versioned learning materials."

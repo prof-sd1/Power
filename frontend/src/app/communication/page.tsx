@@ -11,7 +11,6 @@ const campaigns = [
 export default function CommunicationPage() {
   return (
     <AppShell
-      activeHref="/communication"
       classification={pageLabels.communication}
       title="Communication Service"
       subtitle="Operational notices, SMS/email delivery receipts, escalation templates, and audit logging."

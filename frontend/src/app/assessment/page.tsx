@@ -11,7 +11,6 @@ const exams = [
 export default function AssessmentPage() {
   return (
     <AppShell
-      activeHref="/assessment"
       classification={pageLabels.assessment}
       title="Assessment and Proctoring"
       subtitle="Exam access, integrity signals, browser locks, grade submission, and case review."

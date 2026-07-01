@@ -5,7 +5,6 @@ import { Database, HardDrive, Bot, RadioTower, ShieldCheck } from "lucide-react"
 export default function SystemPage() {
   return (
     <AppShell
-      activeHref="/system"
       classification={pageLabels.system}
       title="System Operations"
       subtitle="Primary node services, storage, cache, LLM runtime, and access boundaries."

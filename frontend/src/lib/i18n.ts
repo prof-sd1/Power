@@ -1,0 +1,195 @@
+import i18n from "i18next";
+import { initReactI18next } from "react-i18next";
+import LanguageDetector from "i18next-browser-languagedetector";
+
+const resources = {
+  en: {
+    translation: {
+      app: {
+        title: "Power College",
+        subtitle: "POC-AMS",
+        tagline: "Academic Management System",
+      },
+      nav: {
+        overview: "Overview",
+        academic: "Academic",
+        identity: "Identity",
+        sis: "SIS",
+        compliance: "Compliance",
+        finance: "Finance",
+        curriculum: "Curriculum",
+        live: "Live",
+        assessment: "Assessment",
+        library: "Library",
+        messages: "Messages",
+        audit: "Audit",
+        system: "System",
+      },
+      auth: {
+        login: "Sign in to Dashboard",
+        logout: "Logout",
+        email: "Student / Staff ID or Email",
+        password: "Password",
+        remember: "Remember my device",
+        forgot: "Forgot password?",
+        register: "Begin Registration",
+        mfa: "Enter your MFA code",
+        compliance:
+          "Access implies consent to the ETA Directive 806/2013 monitoring protocols. Device fingerprinting is active.",
+      },
+      common: {
+        loading: "Loading...",
+        error: "An error occurred",
+        retry: "Retry",
+        save: "Save",
+        cancel: "Cancel",
+        delete: "Delete",
+        search: "Search",
+        noData: "No data available",
+        back: "Back",
+        next: "Next",
+        submit: "Submit",
+        approved: "Approved",
+        rejected: "Rejected",
+        pending: "Pending",
+        blocked: "Blocked",
+        verified: "Verified",
+        compliant: "Compliant",
+        ready: "Ready",
+        waiting: "Waiting",
+        healthy: "Healthy",
+        alert: "Alert",
+      },
+      classification: {
+        overview: "INTERNAL / COMMAND",
+        academic: "RESTRICTED / ACADEMIC",
+        identity: "CONFIDENTIAL / IDENTITY",
+        sis: "RESTRICTED / REGISTRAR",
+        compliance: "STRICTLY CONFIDENTIAL / ETA",
+        finance: "CONFIDENTIAL / FINANCE",
+        curriculum: "RESTRICTED / CONTENT",
+        live: "SENSITIVE / LIVE DELIVERY",
+        assessment: "SENSITIVE / EXAMS",
+        library: "RESTRICTED / CONTENT",
+        communication: "INTERNAL / COMMS",
+        audit: "STRICTLY CONFIDENTIAL / AUDIT",
+        system: "INTERNAL / INFRASTRUCTURE",
+      },
+      time: {
+        eat: "EAT",
+        utc: "UTC",
+      },
+      network: {
+        online: "Online",
+        offline: "Offline",
+        lowBandwidth: "Low bandwidth mode",
+        reconnected: "Connection restored",
+      },
+      dataSovereignty:
+        "All data is stored in Ethiopia per the Ethiopian Data Protection Proclamation. No student PII leaves national borders.",
+    },
+  },
+  am: {
+    translation: {
+      app: {
+        title: "ፓወር ኮሌጅ",
+        subtitle: "POC-AMS",
+        tagline: "የአካዳሚክ አስተዳደር ሥርዓት",
+      },
+      nav: {
+        overview: "አጠቃላይ እይታ",
+        academic: "አካዳሚክ",
+        identity: "ማንነት",
+        sis: "SIS",
+        compliance: "ተገዢነት",
+        finance: "ፋይናንስ",
+        curriculum: "ሥርዓተ ትምህርት",
+        live: "የቀጥታ ስርጭት",
+        assessment: "ፈተና",
+        library: "ቤተ መጻሕፍት",
+        messages: "መልዕክቶች",
+        audit: "ኦዲት",
+        system: "ሥርዓት",
+      },
+      auth: {
+        login: "ወደ ዳሽቦርድ ይግቡ",
+        logout: "ውጣ",
+        email: "የተማሪ / ሠራተኛ መለያ ወይም ኢሜይል",
+        password: "የይለፍ ቃል",
+        remember: "መሣሪያዬን አስታውስ",
+        forgot: "የይለፍ ቃል ረስተዋል?",
+        register: "ምዝገባ ይጀምሩ",
+        mfa: "የ MFA ኮድዎን ያስገቡ",
+        compliance:
+          "መዳረሻ ማለት የETA መመሪያ 806/2013 የክትትል ፕሮቶኮሎችን መቀበል ነው። የመሣሪያ አሻራ ንቁ ነው።",
+      },
+      common: {
+        loading: "በመጫን ላይ...",
+        error: "ስህተት ተከስቷል",
+        retry: "እንደገና ሞክር",
+        save: "አስቀምጥ",
+        cancel: "ሰርዝ",
+        delete: "ሰርዝ",
+        search: "ፈልግ",
+        noData: "ምንም ውሂብ የለም",
+        back: "ተመለስ",
+        next: "ቀጣይ",
+        submit: "አስገባ",
+        approved: "ጸድቋል",
+        rejected: "ውድቅ ተደርጓል",
+        pending: "በመጠባበቅ ላይ",
+        blocked: "ታግዷል",
+        verified: "ተረጋግጧል",
+        compliant: "ተገዢ",
+        ready: "ዝግጁ",
+        waiting: "በመጠባበቅ ላይ",
+        healthy: "ጤናማ",
+        alert: "ማንቂያ",
+      },
+      classification: {
+        overview: "ውስጣዊ / ትእዛዝ",
+        academic: "የተገደበ / አካዳሚክ",
+        identity: "ሚስጥራዊ / ማንነት",
+        sis: "የተገደበ / ሬጅስትራር",
+        compliance: "እጅግ ሚስጥራዊ / ETA",
+        finance: "ሚስጥራዊ / ፋይናንስ",
+        curriculum: "የተገደበ / ይዘት",
+        live: "ስሱ / የቀጥታ ስርጭት",
+        assessment: "ስሱ / ፈተና",
+        library: "የተገደበ / ይዘት",
+        communication: "ውስጣዊ / ኮሙኒኬሽን",
+        audit: "እጅግ ሚስጥራዊ / ኦዲት",
+        system: "ውስጣዊ / መሠረተ ልማት",
+      },
+      time: {
+        eat: "የምስራቅ አፍሪካ ሰዓት",
+        utc: "UTC",
+      },
+      network: {
+        online: "በመስመር ላይ",
+        offline: "ከመስመር ውጭ",
+        lowBandwidth: "ዝቅተኛ የመተላለፊያ ዘዴ",
+        reconnected: "ግንኙነት ተመልሷል",
+      },
+      dataSovereignty:
+        "ሁሉም ውሂብ በኢትዮጵያ ውስጥ የሚከማቸው በኢትዮጵያ የመረጃ ጥበቃ አዋጅ መሠረት ነው። ምንም የተማሪ የግል መረጃ ከሀገር ወሰን አይወጣም።",
+    },
+  },
+};
+
+void i18n
+  .use(LanguageDetector)
+  .use(initReactI18next)
+  .init({
+    resources,
+    fallbackLng: "en",
+    interpolation: {
+      escapeValue: false,
+    },
+    detection: {
+      order: ["localStorage", "navigator"],
+      caches: ["localStorage"],
+    },
+  });
+
+export default i18n;

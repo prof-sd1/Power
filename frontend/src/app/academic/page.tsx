@@ -17,7 +17,6 @@ const gates = [
 export default function AcademicPage() {
   return (
     <AppShell
-      activeHref="/academic"
       classification={pageLabels.academic}
       title="Academic Core"
       subtitle="Course publishing, delivery pacing, syllabus versioning, and instructor eligibility checks."

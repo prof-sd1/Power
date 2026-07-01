@@ -17,7 +17,6 @@ const sessionControls = [
 export default function IdentityPage() {
   return (
     <AppShell
-      activeHref="/identity"
       classification={pageLabels.identity}
       title="Identity and KYC"
       subtitle="Applicant verification, account provisioning, MFA, and session risk controls."

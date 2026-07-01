@@ -11,7 +11,6 @@ const events = [
 export default function AuditPage() {
   return (
     <AppShell
-      activeHref="/audit"
       classification={pageLabels.audit}
       title="Audit and Compliance"
       subtitle="Hash chains, renewal evidence, historical reconstruction, and signed exports."

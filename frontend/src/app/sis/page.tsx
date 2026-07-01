@@ -11,7 +11,6 @@ const applications = [
 export default function SisPage() {
   return (
     <AppShell
-      activeHref="/sis"
       classification={pageLabels.sis}
       title="Student Information System"
       subtitle="Admissions state, course registration, academic records, and transcript controls."

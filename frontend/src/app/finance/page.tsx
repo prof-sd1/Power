@@ -11,7 +11,6 @@ const queue = [
 export default function FinancePage() {
   return (
     <AppShell
-      activeHref="/finance"
       classification={pageLabels.finance}
       title="Finance Vault"
       subtitle="Ledger integrity, tuition holds, maker-checker approvals, and reconciliation."

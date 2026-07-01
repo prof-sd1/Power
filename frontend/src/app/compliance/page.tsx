@@ -11,7 +11,6 @@ const ratios = [
 export default function CompliancePage() {
   return (
     <AppShell
-      activeHref="/compliance"
       classification={pageLabels.compliance}
       title="Online Delivery Compliance"
       subtitle="Directive 806/2013 delivery ratios, live-hour proof, historical imports, and ETA readiness."

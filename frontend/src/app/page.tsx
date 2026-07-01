@@ -35,7 +35,6 @@ const routeLinks = [
 export default function Home() {
   return (
     <AppShell
-      activeHref="/"
       classification={pageLabels.overview}
       title="Operations Command"
       subtitle="A classified front door for the college stack, with each module split into its own page."
